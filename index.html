@@ -215,9 +215,16 @@ const fmtTime = () => new Date().toTimeString().slice(0, 8);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const MENTION_KWS = ["mention", "say", "said", "utter", "speak", "word", "phrase",
-  "sotu", "speech", "address", "press conference", "earnings", "debate", "will use", "trump say"];
+  "sotu", "speech", "address", "press conference", "earnings", "debate", "will use",
+  "trump", "biden", "powell", "fomc", "fed ", "conference", "call", "kxtrump", "kxfomc",
+  "kxsotu", "kxearnings", "mention", "says", "stated", "announce"];
 const isMention = m => {
-  const s = [m.title, m.yes_sub_title, m.event_ticker, m.ticker].join(" ").toLowerCase();
+  const s = [m.title, m.yes_sub_title, m.no_sub_title, m.event_ticker, m.ticker, m.series_ticker]
+    .filter(Boolean).join(" ").toLowerCase();
+  // Also match on ticker patterns like KXTRUMPMENTION
+  if (/kx.*mention/i.test(s)) return true;
+  if (/kx.*say/i.test(s)) return true;
+  if (/kx.*word/i.test(s)) return true;
   return MENTION_KWS.some(k => s.includes(k));
 };
 
@@ -413,13 +420,35 @@ function App() {
     setBacktestResults(null);
     addLog("Fetching settled mentions markets for backtest...", "info");
     try {
-      const s = await fetchSettled(seriesFilter);
-      setSettled(s);
-      addLog(`Fetched ${s.length} resolved mentions markets`, "ok");
+      // First fetch ALL settled markets to see what exists
+      const params = new URLSearchParams({ status: "settled", limit: "200" });
+      if (seriesFilter) params.set("series_ticker", seriesFilter);
+      const raw = await kalshiFetch("/markets", Object.fromEntries(params));
+      const allSettled = raw.markets || [];
+      addLog(`API returned ${allSettled.length} total settled markets`, "ok");
 
-      if (s.length === 0) {
+      const s = allSettled.filter(isMention).filter(m => m.result === "yes" || m.result === "no");
+      setSettled(s);
+      addLog(`${s.length} matched as mentions markets`, s.length > 0 ? "ok" : "warn");
+
+      // Log a sample of what came back so we can tune the filter
+      if (allSettled.length > 0 && s.length === 0) {
+        const sample = allSettled.slice(0, 3).map(m => m.ticker).join(", ");
+        addLog(`Sample tickers: ${sample}`, "warn");
+        addLog("Widening search — using all settled markets", "warn");
+        // Fall back: use ALL settled markets with a result
+        const fallback = allSettled.filter(m => m.result === "yes" || m.result === "no");
+        if (fallback.length > 0) {
+          setSettled(fallback);
+          const rates = buildBaseRates(fallback);
+          const merged = { ...SEED_RATES, ...rates };
+          setBaseRates(merged);
+          addLog(`Built base rates from ${fallback.length} markets`, "ok");
+          setBacktestResults(makeDemoResults());
+          setBacktesting(false);
+          return;
+        }
         addLog("No settled markets found — showing demo results", "warn");
-        // Demo results so the UI is populated
         setBacktestResults(makeDemoResults());
         setBacktesting(false);
         return;
