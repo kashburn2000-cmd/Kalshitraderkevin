@@ -57,6 +57,7 @@ const ALLOWED = [
   /^\/trade-api\/v2\/markets\/[^/]+$/,
   /^\/trade-api\/v2\/markets\/[^/]+\/orderbook(\?.*)?$/,
   /^\/trade-api\/v2\/markets\/[^/]+\/candlesticks(\?.*)?$/,
+  /^\/trade-api\/v2\/series\/[^/]+\/markets\/[^/]+\/candlesticks(\?.*)?$/,
   /^\/trade-api\/v2\/historical\/markets(\?.*)?$/,
   /^\/trade-api\/v2\/historical\/cutoff$/,
   /^\/trade-api\/v2\/portfolio\/balance$/,

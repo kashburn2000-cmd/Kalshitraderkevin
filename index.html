@@ -1212,7 +1212,9 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
     setCandles(null);
     setLoadingCandles(true);
     try {
-      const d = await kalshiFetch(`/markets/${market.ticker}/candlesticks`, { period_interval: "1" });
+      const closeTs = market.close_time ? Math.floor(new Date(market.close_time).getTime() / 1000) : Math.floor(Date.now() / 1000);
+      const startTs = closeTs - 48 * 3600;
+      const d = await kalshiFetch(`/series/${market.series_ticker}/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
       const sticks = d.candlesticks || [];
       setCandles(sticks);
       addLog(`Replay: fetched ${sticks.length} candles for ${market.ticker}`, "ok");
