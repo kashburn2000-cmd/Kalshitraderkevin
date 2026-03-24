@@ -231,27 +231,25 @@ const extractKw = m => {
 // ── Kalshi API (no auth needed for public market data) ────────────────────────
 // ── Authenticated API calls (require env vars set in Netlify) ────────────────
 async function checkAuth() {
-  if (!IS_PROXIED) return { ok: false, reason: 'Running locally — proxy not available' };
+  if (!IS_PROXIED) return { ok: false, reason: 'Running locally' };
   try {
-    const r = await fetch(BASE + '/portfolio/balance');
-    if (r.status === 500) { const d = await r.json(); return { ok: false, reason: d.hint || d.error }; }
-    if (!r.ok) return { ok: false, reason: 'HTTP ' + r.status };
-    const d = await r.json();
+    const d = await kalshiFetch('/portfolio/balance');
     return { ok: true, balance: (d.balance || 0) / 100 };
-  } catch(e) { return { ok: false, reason: e.message }; }
+  } catch(e) {
+    // Distinguish "creds not set" from "network error"
+    if (e.message.includes('500')) return { ok: false, reason: 'API key not configured in Netlify env vars' };
+    if (e.message.includes('502')) return { ok: false, reason: 'Proxy cannot reach Kalshi — check function logs' };
+    return { ok: false, reason: e.message };
+  }
 }
 
 async function fetchBalance() {
-  const r = await fetch(BASE + '/portfolio/balance');
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const d = await r.json();
+  const d = await kalshiFetch('/portfolio/balance');
   return (d.balance || 0) / 100;
 }
 
 async function fetchPositions() {
-  const r = await fetch(BASE + '/portfolio/positions');
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const d = await r.json();
+  const d = await kalshiFetch('/portfolio/positions');
   return d.market_positions || [];
 }
 
@@ -262,22 +260,30 @@ async function placeRealOrder(ticker, side, priceCents, count) {
   return r.json();
 }
 
-// Public market data — always hits Kalshi directly (no auth, no proxy needed)
+// All API calls go through /api proxy (avoids CORS — Kalshi blocks direct browser calls)
+async function kalshiFetch(path, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${BASE}${path}${qs ? "?" + qs : ""}`;
+  const r = await fetch(url);
+  if (!r.ok) {
+    let detail = "";
+    try { const e = await r.json(); detail = e.detail || e.error || ""; } catch {}
+    throw new Error(`HTTP ${r.status}${detail ? ": " + detail : ""}`);
+  }
+  return r.json();
+}
+
 async function fetchMarkets(seriesFilter = "") {
-  const params = new URLSearchParams({ status: "open", limit: "200" });
-  if (seriesFilter) params.set("series_ticker", seriesFilter);
-  const r = await fetch(`${KALSHI_PUBLIC}/markets?${params}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const d = await r.json();
+  const params = { status: "open", limit: "200" };
+  if (seriesFilter) params.series_ticker = seriesFilter;
+  const d = await kalshiFetch("/markets", params);
   return (d.markets || []).filter(isMention);
 }
 
 async function fetchSettled(seriesFilter = "") {
-  const params = new URLSearchParams({ status: "settled", limit: "200" });
-  if (seriesFilter) params.set("series_ticker", seriesFilter);
-  const r = await fetch(`${KALSHI_PUBLIC}/markets?${params}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  const d = await r.json();
+  const params = { status: "settled", limit: "200" };
+  if (seriesFilter) params.series_ticker = seriesFilter;
+  const d = await kalshiFetch("/markets", params);
   return (d.markets || []).filter(isMention).filter(m => m.result === "yes" || m.result === "no");
 }
 

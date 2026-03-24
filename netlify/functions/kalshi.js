@@ -7,6 +7,7 @@
 //   KALSHI_PRIVATE_KEY — your full PEM private key (include header/footer lines)
 
 const https = require("https");
+const http = require("http");
 const crypto = require("crypto");
 
 const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
@@ -51,22 +52,40 @@ function signRequest(method, path, timestampMs, privateKeyPem) {
   return signature.toString("base64");
 }
 
-// ── Simple HTTPS request helper ───────────────────────────────────────────────
-function httpsRequest(url, options, body) {
+// ── HTTPS request helper (uses Node built-in, works in Netlify functions) ────
+function httpsRequest(urlStr, options, body) {
   return new Promise((resolve, reject) => {
-    const req = https.request(url, options, (res) => {
+    const parsedUrl = new URL(urlStr);
+    const reqOptions = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || 443,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || "GET",
+      headers: options.headers || {},
+    };
+
+    const req = https.request(reqOptions, (res) => {
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => {
         try {
           resolve({ status: res.statusCode, body: JSON.parse(data) });
         } catch {
-          resolve({ status: res.statusCode, body: data });
+          resolve({ status: res.statusCode, body: { raw: data } });
         }
       });
     });
-    req.on("error", reject);
-    if (body) req.write(JSON.stringify(body));
+
+    req.on("error", (err) => {
+      reject(new Error(`Network error: ${err.message} (code: ${err.code})`));
+    });
+
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error("Request timed out after 10s"));
+    });
+
+    if (body) req.write(typeof body === "string" ? body : JSON.stringify(body));
     req.end();
   });
 }
@@ -109,6 +128,11 @@ exports.handler = async (event) => {
   const rawPath = event.path.replace(/^\/?api/, "");
   const queryString = event.rawQuery ? `?${event.rawQuery}` : "";
   const kalshiPath = `/trade-api/v2${rawPath}${queryString}`;
+
+  // Built-in ping — lets us verify the function is running at all
+  if (rawPath === "/ping" || rawPath === "/ping/") {
+    return respond(200, { ok: true, message: "Function is alive", ts: Date.now() });
+  }
 
   // Security: validate path is on whitelist
   if (!isAllowed(kalshiPath)) {
@@ -161,7 +185,12 @@ exports.handler = async (event) => {
     const result = await httpsRequest(url.toString(), options, body);
     return respond(result.status, result.body);
   } catch (e) {
-    return respond(502, { error: "Upstream request failed", detail: e.message });
+    return respond(502, {
+      error: "Upstream request failed",
+      detail: e.message,
+      target: url.toString(),
+      hint: "Check Netlify function logs for full error. May be a network restriction on free tier."
+    });
   }
 };
 
