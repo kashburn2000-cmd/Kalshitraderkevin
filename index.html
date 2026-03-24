@@ -7,6 +7,7 @@
 <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
 <style>
@@ -681,6 +682,7 @@ function App() {
           <div className="sidebar-section">Analysis</div>
           {[
             { id: "backtest", icon: "◷", label: "Backtester" },
+            { id: "replay", icon: "▶", label: "Replay" },
             { id: "baserates", icon: "∿", label: "Base Rates" },
           ].map(item => (
             <div key={item.id} className={`nav-item ${tab === item.id ? "active" : ""}`} onClick={() => setTab(item.id)}>
@@ -735,6 +737,7 @@ function App() {
           {tab === "orders" && <OrdersTab orders={orders} />}
           {tab === "backtest" && <BacktestTab results={backtestResults} backtesting={backtesting}
             onRun={runBacktest} settled={settled} />}
+          {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} />}
           {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} />}
         </div>
 
@@ -1109,6 +1112,390 @@ function BaseRatesTab({ baseRates, settled }) {
         <p>Each rate is the probability a keyword resolves YES, computed from resolved Kalshi markets using Bayesian smoothing (adds one pseudo-observation per side to prevent small samples from showing 0% or 100%).</p>
         <p style={{ marginTop: 8 }}>★ = seed only, ★★ = 3+ observations, ★★★ = 8+ observations. Only trade on ★★+ with meaningful edge.</p>
       </div>
+    </div>
+  );
+}
+
+// ── Replay tab ────────────────────────────────────────────────────────────────
+function ReplayTab({ baseRates, minEdge, maxSize, addLog }) {
+  const [events, setEvents] = useState(null); // { [event_ticker]: { label, markets[] } }
+  const [selectedEvent, setSelectedEvent] = useState("");
+  const [selectedMarket, setSelectedMarket] = useState(null);
+  const [candles, setCandles] = useState(null);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [loadingCandles, setLoadingCandles] = useState(false);
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
+
+  const TARGET_EXIT = 0.88;
+  const STOP_LOSS = 0.25;
+
+  // Fetch settled events on mount
+  useEffect(() => {
+    async function load() {
+      setLoadingEvents(true);
+      try {
+        const params = { status: "settled", limit: "200" };
+        const d = await kalshiFetch("/markets", params);
+        const settled = (d.markets || []).filter(isMention).filter(m => m.result === "yes" || m.result === "no");
+
+        // Group by event_ticker
+        const grouped = {};
+        for (const m of settled) {
+          const et = m.event_ticker || m.ticker;
+          if (!grouped[et]) {
+            // Build a human-readable label from the event
+            const closeDate = m.close_time ? new Date(m.close_time) : null;
+            const dateStr = closeDate ? closeDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+            // Try to extract event name from title
+            const titleParts = (m.title || "").split(/\s+(to|during|in|at)\s+/i);
+            const eventName = titleParts.length > 2 ? titleParts.slice(-1)[0].replace(/\?$/, "") : et.replace(/^KX/, "").replace(/-/g, " ");
+            grouped[et] = { label: `${eventName} — ${dateStr}`, markets: [] };
+          }
+          grouped[et].markets.push(m);
+        }
+        setEvents(grouped);
+        addLog(`Replay: loaded ${settled.length} settled markets in ${Object.keys(grouped).length} events`, "ok");
+      } catch (e) {
+        addLog("Replay: failed to load events — " + e.message, "err");
+      }
+      setLoadingEvents(false);
+    }
+    load();
+  }, []);
+
+  // Fetch candlesticks when a market is selected
+  async function loadCandles(market) {
+    setSelectedMarket(market);
+    setCandles(null);
+    setLoadingCandles(true);
+    try {
+      const d = await kalshiFetch(`/markets/${market.ticker}/candlesticks`, { period_interval: "1" });
+      const sticks = d.candlesticks || [];
+      setCandles(sticks);
+      addLog(`Replay: fetched ${sticks.length} candles for ${market.ticker}`, "ok");
+    } catch (e) {
+      addLog("Replay: candlestick fetch failed — " + e.message, "err");
+      setCandles([]);
+    }
+    setLoadingCandles(false);
+  }
+
+  // Compute signal data for selected market
+  function computeSignalData(market) {
+    const edge = computeEdge(market, baseRates);
+    if (!edge) return null;
+    const side = edge.edge > 0 ? "yes" : "no";
+    const entryPrice = side === "yes" ? edge.mid : 1 - edge.mid;
+    const correct = side === market.result;
+    const exit = correct ? 1.0 : 0.0;
+    const pnl = (exit - entryPrice) * maxSize;
+    return { ...edge, side, entryPrice, correct, pnl };
+  }
+
+  // Render chart when candles change
+  useEffect(() => {
+    if (!candles || candles.length === 0 || !chartRef.current || !selectedMarket) return;
+
+    // Destroy previous chart
+    if (chartInstance.current) {
+      chartInstance.current.destroy();
+      chartInstance.current = null;
+    }
+
+    const sorted = [...candles].sort((a, b) => new Date(a.end_period_ts || a.t) - new Date(b.end_period_ts || b.t));
+    const labels = sorted.map(c => {
+      const d = new Date(c.end_period_ts || c.t);
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    });
+    const prices = sorted.map(c => {
+      // Candlestick may have yes_price, close, or price field — use what's available
+      const p = c.yes_close != null ? c.yes_close : c.close != null ? c.close : c.price != null ? c.price : c.yes_price;
+      return typeof p === "number" ? p * 100 : parseFloat(p) * 100 || 0;
+    });
+
+    const sig = computeSignalData(selectedMarket);
+    const resolveTime = selectedMarket.close_time ? new Date(selectedMarket.close_time) : null;
+
+    // Find key points for annotations
+    const pointColors = prices.map(() => "transparent");
+    const pointRadii = prices.map(() => 0);
+
+    if (sig) {
+      const entryPriceCents = sig.entryPrice * 100;
+      const targetCents = TARGET_EXIT * 100;
+      const stopCents = STOP_LOSS * 100;
+      let entryFired = false;
+      let tradeDone = false;
+
+      for (let i = 0; i < prices.length; i++) {
+        const p = sig.side === "yes" ? prices[i] : 100 - prices[i];
+
+        // Signal entry: price below fair value by more than edge threshold
+        if (!entryFired && !tradeDone) {
+          const priceFrac = prices[i] / 100;
+          const edgeHere = sig.fv - priceFrac;
+          if (edgeHere > minEdge) {
+            pointColors[i] = "#00d97e";
+            pointRadii[i] = 6;
+            entryFired = true;
+            continue;
+          }
+        }
+
+        if (entryFired && !tradeDone) {
+          // Stop loss
+          if (prices[i] <= stopCents) {
+            pointColors[i] = "#ff4d4d";
+            pointRadii[i] = 6;
+            tradeDone = true;
+            continue;
+          }
+          // Target exit
+          if (prices[i] >= targetCents) {
+            pointColors[i] = "#00d97e";
+            pointRadii[i] = 6;
+            tradeDone = true;
+            continue;
+          }
+        }
+      }
+    }
+
+    // Find resolve line index
+    let resolveIdx = null;
+    if (resolveTime) {
+      let minDiff = Infinity;
+      sorted.forEach((c, i) => {
+        const diff = Math.abs(new Date(c.end_period_ts || c.t) - resolveTime);
+        if (diff < minDiff) { minDiff = diff; resolveIdx = i; }
+      });
+    }
+
+    const ctx = chartRef.current.getContext("2d");
+    chartInstance.current = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "YES Price (¢)",
+          data: prices,
+          borderColor: "#3d9eff",
+          borderWidth: 1.5,
+          pointBackgroundColor: pointColors,
+          pointBorderColor: pointColors,
+          pointRadius: pointRadii,
+          pointHoverRadius: pointRadii.map(r => r > 0 ? r + 2 : 0),
+          fill: false,
+          tension: 0.2,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 400 },
+        scales: {
+          x: {
+            ticks: { color: "#545b64", font: { family: "'DM Mono', monospace", size: 10 }, maxTicksLimit: 12 },
+            grid: { color: "rgba(255,255,255,0.05)" },
+          },
+          y: {
+            min: 0, max: 100,
+            ticks: { color: "#545b64", font: { family: "'DM Mono', monospace", size: 10 }, callback: v => v + "¢" },
+            grid: { color: "rgba(255,255,255,0.05)" },
+          }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: "#1e2227",
+            borderColor: "rgba(255,255,255,0.12)",
+            borderWidth: 1,
+            titleFont: { family: "'DM Mono', monospace", size: 11 },
+            bodyFont: { family: "'DM Mono', monospace", size: 11 },
+            callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + "¢" }
+          },
+          annotation: resolveIdx !== null ? {
+            annotations: {
+              resolveLine: {
+                type: "line", xMin: resolveIdx, xMax: resolveIdx,
+                borderColor: "#ffb830", borderWidth: 1, borderDash: [4, 4],
+                label: { display: true, content: "Resolved", color: "#ffb830", font: { size: 10 }, position: "start" }
+              }
+            }
+          } : undefined
+        }
+      },
+      plugins: resolveIdx !== null ? [{
+        id: "resolveLine",
+        afterDraw(chart) {
+          const xScale = chart.scales.x;
+          const yScale = chart.scales.y;
+          const x = xScale.getPixelForValue(resolveIdx);
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.beginPath();
+          ctx.setLineDash([4, 4]);
+          ctx.strokeStyle = "#ffb830";
+          ctx.lineWidth = 1;
+          ctx.moveTo(x, yScale.top);
+          ctx.lineTo(x, yScale.bottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = "#ffb830";
+          ctx.font = "10px 'DM Mono', monospace";
+          ctx.fillText("Resolved", x + 4, yScale.top + 12);
+          ctx.restore();
+        }
+      }] : []
+    });
+
+    return () => {
+      if (chartInstance.current) {
+        chartInstance.current.destroy();
+        chartInstance.current = null;
+      }
+    };
+  }, [candles, selectedMarket]);
+
+  const eventKeys = events ? Object.keys(events) : [];
+  const currentMarkets = selectedEvent && events ? (events[selectedEvent]?.markets || []) : [];
+  const sig = selectedMarket ? computeSignalData(selectedMarket) : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="section-header">
+        <div className="section-title">Event Replay</div>
+      </div>
+
+      {/* Event picker */}
+      <div className="card">
+        <div className="card-title">▶ Select Event</div>
+        {loadingEvents ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text3)", fontSize: 13 }}>
+            <div className="scan-pulse" /> Loading settled events...
+          </div>
+        ) : events && eventKeys.length === 0 ? (
+          <div className="empty"><div className="empty-msg">No settled KXTRUMPMENTION events found</div></div>
+        ) : (
+          <select value={selectedEvent} onChange={e => { setSelectedEvent(e.target.value); setSelectedMarket(null); setCandles(null); }}
+            style={{ width: "100%", padding: "8px 10px" }}>
+            <option value="">Choose a past event...</option>
+            {eventKeys.map(et => (
+              <option key={et} value={et}>{events[et].label} ({events[et].markets.length} markets)</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* Market list */}
+      {selectedEvent && currentMarkets.length > 0 && (
+        <div className="card">
+          <div className="card-title">Markets in Event ({currentMarkets.length})</div>
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Keyword</th><th>Result</th><th>Settlement</th><th></th></tr></thead>
+              <tbody>
+                {currentMarkets.map((m, i) => {
+                  const kw = extractKw(m);
+                  const settlePrice = m.result === "yes" ? "100¢" : "0¢";
+                  const isSelected = selectedMarket && selectedMarket.ticker === m.ticker;
+                  return (
+                    <tr key={i} style={isSelected ? { background: "var(--bg4)" } : {}}>
+                      <td><span className="keyword">{kw}</span></td>
+                      <td><span className={`badge ${m.result === "yes" ? "badge-yes" : "badge-no"}`}>{m.result.toUpperCase()}</span></td>
+                      <td><span className="price">{settlePrice}</span></td>
+                      <td>
+                        <button className={`btn ${isSelected ? "btn-primary" : ""}`}
+                          style={{ padding: "3px 10px", fontSize: 11 }}
+                          onClick={() => loadCandles(m)}
+                          disabled={loadingCandles}>
+                          {loadingCandles && isSelected ? "Loading..." : isSelected ? "Viewing" : "View"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Price chart */}
+      {selectedMarket && (
+        <div className="card">
+          <div className="card-title" style={{ display: "flex", justifyContent: "space-between" }}>
+            <span>Price History — {selectedMarket.ticker}</span>
+            <div style={{ display: "flex", gap: 12, fontSize: 10, fontFamily: "var(--font-mono)" }}>
+              <span style={{ color: "#00d97e" }}>● Entry/Target</span>
+              <span style={{ color: "#ff4d4d" }}>● Stop Loss</span>
+              <span style={{ color: "#ffb830" }}>┆ Resolved</span>
+            </div>
+          </div>
+          {loadingCandles ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text3)", fontSize: 13, padding: "20px 0" }}>
+              <div className="scan-pulse" /> Fetching candlestick data...
+            </div>
+          ) : candles && candles.length === 0 ? (
+            <div className="empty"><div className="empty-msg">No candlestick data available for this market</div></div>
+          ) : (
+            <div style={{ height: 300, position: "relative" }}>
+              <canvas ref={chartRef} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Signal overlay panel */}
+      {selectedMarket && sig && !loadingCandles && (
+        <div className="card">
+          <div className="card-title">Signal Analysis</div>
+          <div className="metrics" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+            <div className="metric">
+              <div className="metric-label">Entry Price</div>
+              <div className="metric-value" style={{ fontSize: 18 }}>{fmtPct(sig.entryPrice)}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Fair Value</div>
+              <div className="metric-value" style={{ fontSize: 18 }}>{fmtPct(sig.fv)}</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Edge</div>
+              <div className={`metric-value ${sig.edge > 0 ? "green" : "red"}`} style={{ fontSize: 18 }}>
+                {sig.edge > 0 ? "+" : ""}{(sig.edge * 100).toFixed(0)}¢
+              </div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Side</div>
+              <div className="metric-value" style={{ fontSize: 14 }}>
+                <span className={`badge ${sig.side === "yes" ? "badge-yes" : "badge-no"}`}>{sig.side.toUpperCase()}</span>
+              </div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Simulated P&L</div>
+              <div className={`metric-value ${sig.pnl >= 0 ? "green" : "red"}`} style={{ fontSize: 18 }}>
+                {fmtDollar(sig.pnl)}
+              </div>
+              <div className="metric-sub">{maxSize} contracts</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Verdict</div>
+              <div className={`metric-value ${sig.correct ? "green" : "red"}`} style={{ fontSize: 14 }}>
+                {sig.correct ? "CORRECT" : "WRONG"}
+              </div>
+              <div className="metric-sub">Result: {selectedMarket.result.toUpperCase()}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedMarket && !sig && !loadingCandles && (
+        <div className="card">
+          <div className="card-title">Signal Analysis</div>
+          <div className="empty"><div className="empty-msg">No signal data — keyword not in base rate database or no price data available</div></div>
+        </div>
+      )}
     </div>
   );
 }
