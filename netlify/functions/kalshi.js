@@ -14,11 +14,36 @@ const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 // ── RSA-PSS signing (matches Kalshi's auth spec exactly) ─────────────────────
 function signRequest(method, path, timestampMs, privateKeyPem) {
   const message = `${timestampMs}${method.toUpperCase()}${path}`;
+
+  // Normalize key — Netlify can collapse newlines, and Kalshi generates
+  // PKCS#1 (RSA PRIVATE KEY) format. Handle both gracefully.
+  let pem = privateKeyPem
+    .replace(/\n/g, "
+")   // escaped literal 
+ -> real newline
+    .replace(/
+/g, "
+")  // windows line endings
+    .trim();
+
+  // If newlines are missing, reformat into proper PEM 64-char lines
+  if (!pem.includes("
+")) {
+    const isRSA = pem.includes("RSA PRIVATE KEY");
+    const header = isRSA ? "-----BEGIN RSA PRIVATE KEY-----" : "-----BEGIN PRIVATE KEY-----";
+    const footer = isRSA ? "-----END RSA PRIVATE KEY-----" : "-----END PRIVATE KEY-----";
+    const body = pem.replace(header, "").replace(footer, "").trim().match(/.{1,64}/g).join("
+");
+    pem = header + "
+" + body + "
+" + footer;
+  }
+
   const signature = crypto.sign(
     "sha256",
     Buffer.from(message, "utf8"),
     {
-      key: privateKeyPem,
+      key: pem,
       padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
       saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
     }
