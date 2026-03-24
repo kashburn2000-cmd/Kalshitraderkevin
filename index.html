@@ -228,11 +228,45 @@ const isMention = m => {
   return MENTION_KWS.some(k => s.includes(k));
 };
 
+const FILLER_WORDS = new Set(["the","a","an","will","say","said","says","be","mentioned","mention","during","speech","address","in","his","her","at","to","of","and","or","is","it","that","this","for","on","with","by","from","he","she","they","its","their","stated","announce","use","word","phrase"]);
+
+function normalizeKw(raw) {
+  // 1. Handle slash-separated variants: take just the first term
+  let s = raw.split(/\s*\/\s*/)[0];
+  // 2. Strip punctuation except hyphens within words
+  s = s.replace(/[''"""\u2018\u2019\u201C\u201D]/g, "").replace(/[^\w\s-]/g, " ");
+  // 3. Lowercase, split, strip filler, rejoin
+  const words = s.toLowerCase().split(/\s+/).filter(w => w.length > 0 && !FILLER_WORDS.has(w));
+  // 4. Strip trailing 's' for naive depluralization (but protect short words and known terms)
+  const deplural = words.map(w => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) ? w.slice(0, -1) : w);
+  return deplural.join(" ").trim().slice(0, 30) || raw.toLowerCase().trim().slice(0, 30);
+}
+
+const SEED_KEYS = null; // populated after SEED_RATES is defined — see matchSeedKey below
+
+function matchSeedKey(normalized, seedKeys) {
+  // Exact match first
+  if (seedKeys.includes(normalized)) return normalized;
+  // Check if normalized contains or is contained in a seed key
+  for (const sk of seedKeys) {
+    if (normalized.includes(sk) || sk.includes(normalized)) return sk;
+    // Also check individual words
+    const nWords = normalized.split(" ");
+    if (nWords.some(w => w === sk)) return sk;
+  }
+  return normalized;
+}
+
 const extractKw = m => {
   const src = [m.yes_sub_title, m.title].join(" ");
-  const quoted = src.match(/['"'""](.+?)['"'""]/);
-  if (quoted) return quoted[1].toLowerCase().trim();
-  return (m.yes_sub_title || m.title || "").toLowerCase().replace(/will be mentioned|mentioned|says|say|during|speech|address/gi, "").trim().slice(0, 24);
+  const quoted = src.match(/['"'""\u2018\u2019\u201C\u201D](.+?)['"'""\u2018\u2019\u201C\u201D]/);
+  let raw;
+  if (quoted) {
+    raw = quoted[1];
+  } else {
+    raw = (m.yes_sub_title || m.title || "");
+  }
+  return normalizeKw(raw);
 };
 
 // ── Kalshi API (no auth needed for public market data) ────────────────────────
@@ -296,15 +330,30 @@ async function fetchSettled(seriesFilter = "") {
 
 // ── Strategy ─────────────────────────────────────────────────────────────────
 function buildBaseRates(settledMarkets) {
+  const seedKeys = Object.keys(SEED_RATES);
   const counts = {};
   for (const m of settledMarkets) {
-    const kw = extractKw(m);
+    const rawKw = extractKw(m);
+    // Fuzzy-match against seed keys so "economic" merges into "economy" etc.
+    const kw = matchSeedKey(rawKw, seedKeys);
     if (!counts[kw]) counts[kw] = { yes: 0, no: 0 };
     if (m.result === "yes") counts[kw].yes++;
     else counts[kw].no++;
   }
+  // Second pass: merge any remaining duplicates where one key is substring of another
+  const merged = {};
+  const sortedKeys = Object.keys(counts).sort((a, b) => a.length - b.length);
+  for (const kw of sortedKeys) {
+    const existing = Object.keys(merged).find(mk => kw.includes(mk) || mk.includes(kw));
+    if (existing) {
+      merged[existing].yes += counts[kw].yes;
+      merged[existing].no += counts[kw].no;
+    } else {
+      merged[kw] = { ...counts[kw] };
+    }
+  }
   const rates = {};
-  for (const [kw, c] of Object.entries(counts)) {
+  for (const [kw, c] of Object.entries(merged)) {
     const n = c.yes + c.no;
     rates[kw] = { rate: (c.yes + 1) / (n + 2), n, yes: c.yes, no: c.no };
   }
@@ -323,8 +372,9 @@ const SEED_RATES = {
 };
 
 function computeEdge(market, baseRates) {
-  const kw = extractKw(market);
-  const entry = baseRates[kw] || Object.entries(baseRates).find(([k]) => kw.includes(k) || k.includes(kw))?.[1];
+  const rawKw = extractKw(market);
+  const kw = matchSeedKey(rawKw, Object.keys(baseRates));
+  const entry = baseRates[kw];
   if (!entry) return null;
   const bid = parseFloat(market.yes_bid_dollars) || null;
   const ask = parseFloat(market.yes_ask_dollars) || null;
@@ -458,8 +508,10 @@ function App() {
       const walkDb = {};
       const trades = [];
 
+      const seedKeys = Object.keys(SEED_RATES);
       for (const m of sorted) {
-        const kw = extractKw(m);
+        const rawKw = extractKw(m);
+        const kw = matchSeedKey(rawKw, [...seedKeys, ...Object.keys(walkDb)]);
         const e = computeEdge(m, { ...SEED_RATES, ...walkDb });
         if (e && Math.abs(e.edge) >= minEdge) {
           const side = e.edge > 0 ? "yes" : "no";
@@ -469,8 +521,11 @@ function App() {
           const pnl = (exit - entry) * maxSize;
           trades.push({ ticker: m.ticker, kw, entry, fv: e.fv, edge: e.edge, result: m.result, pnl, correct });
         }
-        if (!walkDb[kw]) walkDb[kw] = { yes: 0, no: 0 };
+        if (!walkDb[kw]) walkDb[kw] = { yes: 0, no: 0, rate: 0.5, n: 0 };
         if (m.result === "yes") walkDb[kw].yes++; else walkDb[kw].no++;
+        const wn = walkDb[kw].yes + walkDb[kw].no;
+        walkDb[kw].n = wn;
+        walkDb[kw].rate = (walkDb[kw].yes + 1) / (wn + 2);
       }
 
       const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
