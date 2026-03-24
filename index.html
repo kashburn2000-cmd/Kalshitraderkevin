@@ -1228,7 +1228,16 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
     const edge = computeEdge(market, baseRates);
     if (!edge) return null;
     const side = edge.edge > 0 ? "yes" : "no";
-    const entryPrice = side === "yes" ? edge.mid : 1 - edge.mid;
+    let midPrice = edge.mid;
+    if (!midPrice || midPrice === 0) {
+      midPrice = parseFloat(market.last_price_dollars) || 0;
+      if (!midPrice) {
+        const b = parseFloat(market.yes_bid_dollars) || 0;
+        const a = parseFloat(market.yes_ask_dollars) || 0;
+        if (b || a) midPrice = b && a ? (b + a) / 2 : (b || a);
+      }
+    }
+    const entryPrice = side === "yes" ? midPrice : 1 - midPrice;
     const correct = side === market.result;
     const exit = correct ? 1.0 : 0.0;
     const pnl = (exit - entryPrice) * maxSize;
