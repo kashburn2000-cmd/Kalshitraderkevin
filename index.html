@@ -202,9 +202,11 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
-// Proxy auto-detection: on Netlify use /api (signed server-side), else call Kalshi directly
+// Public endpoints go directly to Kalshi (no auth needed, no proxy needed).
+// Authenticated endpoints (orders, balance, positions) go through /api proxy.
+const KALSHI_PUBLIC = 'https://api.elections.kalshi.com/trade-api/v2';
 const IS_PROXIED = window.location.hostname !== 'localhost' && window.location.protocol !== 'file:';
-const BASE = IS_PROXIED ? '/api' : 'https://api.elections.kalshi.com/trade-api/v2';
+const BASE = IS_PROXIED ? '/api' : KALSHI_PUBLIC;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const fmtPct = v => (v * 100).toFixed(0) + "¢";
@@ -229,6 +231,7 @@ const extractKw = m => {
 // ── Kalshi API (no auth needed for public market data) ────────────────────────
 // ── Authenticated API calls (require env vars set in Netlify) ────────────────
 async function checkAuth() {
+  if (!IS_PROXIED) return { ok: false, reason: 'Running locally — proxy not available' };
   try {
     const r = await fetch(BASE + '/portfolio/balance');
     if (r.status === 500) { const d = await r.json(); return { ok: false, reason: d.hint || d.error }; }
@@ -259,10 +262,11 @@ async function placeRealOrder(ticker, side, priceCents, count) {
   return r.json();
 }
 
+// Public market data — always hits Kalshi directly (no auth, no proxy needed)
 async function fetchMarkets(seriesFilter = "") {
   const params = new URLSearchParams({ status: "open", limit: "200" });
   if (seriesFilter) params.set("series_ticker", seriesFilter);
-  const r = await fetch(`${BASE}/markets?${params}`);
+  const r = await fetch(`${KALSHI_PUBLIC}/markets?${params}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const d = await r.json();
   return (d.markets || []).filter(isMention);
@@ -271,7 +275,7 @@ async function fetchMarkets(seriesFilter = "") {
 async function fetchSettled(seriesFilter = "") {
   const params = new URLSearchParams({ status: "settled", limit: "200" });
   if (seriesFilter) params.set("series_ticker", seriesFilter);
-  const r = await fetch(`${BASE}/markets?${params}`);
+  const r = await fetch(`${KALSHI_PUBLIC}/markets?${params}`);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const d = await r.json();
   return (d.markets || []).filter(isMention).filter(m => m.result === "yes" || m.result === "no");
