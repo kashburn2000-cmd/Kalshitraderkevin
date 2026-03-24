@@ -232,8 +232,8 @@ const isMention = m => {
 const FILLER_WORDS = new Set(["the","a","an","will","say","said","says","be","mentioned","mention","during","speech","address","in","his","her","at","to","of","and","or","is","it","that","this","for","on","with","by","from","he","she","they","its","their","stated","announce","use","word","phrase"]);
 
 function normalizeKw(raw) {
-  // 1. Handle slash-separated variants: take just the first term
-  let s = raw.split(/\s*\/\s*/)[0];
+  // 1. Handle slash-separated variants: keep ALL terms (replace / with space)
+  let s = raw.replace(/\s*\/\s*/g, " ");
   // 2. Strip punctuation except hyphens within words
   s = s.replace(/[''"""\u2018\u2019\u201C\u201D]/g, "").replace(/[^\w\s-]/g, " ");
   // 3. Lowercase, split, strip filler, rejoin
@@ -243,17 +243,25 @@ function normalizeKw(raw) {
   return deplural.join(" ").trim().slice(0, 30) || raw.toLowerCase().trim().slice(0, 30);
 }
 
-const SEED_KEYS = null; // populated after SEED_RATES is defined — see matchSeedKey below
+// Aliases map variant keywords to canonical seed keys
+const SEED_ALIASES = { "btc": "crypto", "bitcoin": "crypto", "cryptocurrency": "crypto", "cryptocurrenc": "crypto", "digital currency": "crypto" };
 
 function matchSeedKey(normalized, seedKeys) {
   // Exact match first
   if (seedKeys.includes(normalized)) return normalized;
+  // Check aliases
+  if (SEED_ALIASES[normalized] && seedKeys.includes(SEED_ALIASES[normalized])) return SEED_ALIASES[normalized];
   // Check if normalized contains or is contained in a seed key
   for (const sk of seedKeys) {
     if (normalized.includes(sk) || sk.includes(normalized)) return sk;
-    // Also check individual words
+    // Check individual words of multi-word normalized string
     const nWords = normalized.split(" ");
-    if (nWords.some(w => w === sk)) return sk;
+    if (nWords.some(w => w === sk || (SEED_ALIASES[w] === sk))) return sk;
+  }
+  // Check aliases for individual words
+  const nWords = normalized.split(" ");
+  for (const w of nWords) {
+    if (SEED_ALIASES[w] && seedKeys.includes(SEED_ALIASES[w])) return SEED_ALIASES[w];
   }
   return normalized;
 }
@@ -337,6 +345,7 @@ function buildBaseRates(settledMarkets) {
     const rawKw = extractKw(m);
     // Fuzzy-match against seed keys so "economic" merges into "economy" etc.
     const kw = matchSeedKey(rawKw, seedKeys);
+    console.log(`[BaseRates] ticker=${m.ticker} raw="${rawKw}" → matched="${kw}" result=${m.result}`);
     if (!counts[kw]) counts[kw] = { yes: 0, no: 0 };
     if (m.result === "yes") counts[kw].yes++;
     else counts[kw].no++;
@@ -369,7 +378,6 @@ const SEED_RATES = {
   "economy": { rate: 0.80, n: 0, yes: 0, no: 0 },
   "ai": { rate: 0.65, n: 0, yes: 0, no: 0 },
   "crypto": { rate: 0.22, n: 0, yes: 0, no: 0 },
-  "bitcoin": { rate: 0.20, n: 0, yes: 0, no: 0 },
 };
 
 function computeEdge(market, baseRates) {
@@ -513,6 +521,7 @@ function App() {
       for (const m of sorted) {
         const rawKw = extractKw(m);
         const kw = matchSeedKey(rawKw, [...seedKeys, ...Object.keys(walkDb)]);
+        console.log(`[Backtest] ticker=${m.ticker} extractKw="${rawKw}" → matched="${kw}"`);
         const e = computeEdge(m, { ...SEED_RATES, ...walkDb });
         if (e && Math.abs(e.edge) >= minEdge) {
           const side = e.edge > 0 ? "yes" : "no";
@@ -737,7 +746,7 @@ function App() {
           {tab === "orders" && <OrdersTab orders={orders} />}
           {tab === "backtest" && <BacktestTab results={backtestResults} backtesting={backtesting}
             onRun={runBacktest} settled={settled} />}
-          {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} />}
+          {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} seriesFilter={seriesFilter} />}
           {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} />}
         </div>
 
@@ -1117,13 +1126,14 @@ function BaseRatesTab({ baseRates, settled }) {
 }
 
 // ── Replay tab ────────────────────────────────────────────────────────────────
-function ReplayTab({ baseRates, minEdge, maxSize, addLog }) {
+function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
   const [events, setEvents] = useState(null); // { [event_ticker]: { label, markets[] } }
   const [selectedEvent, setSelectedEvent] = useState("");
   const [selectedMarket, setSelectedMarket] = useState(null);
   const [candles, setCandles] = useState(null);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [loadingCandles, setLoadingCandles] = useState(false);
+  const [fetchError, setFetchError] = useState(null);
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
 
@@ -1134,10 +1144,41 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog }) {
   useEffect(() => {
     async function load() {
       setLoadingEvents(true);
+      setFetchError(null);
       try {
-        const params = { status: "settled", limit: "200" };
-        const d = await kalshiFetch("/markets", params);
-        const settled = (d.markets || []).filter(isMention).filter(m => m.result === "yes" || m.result === "no");
+        // Fetch with series_ticker filter to get mention markets specifically
+        // Try multiple series tickers to catch KXTRUMPMENTION events
+        const seriesToTry = seriesFilter ? [seriesFilter] : ["KXTRUMPMENTION", "KXSOTU", "KXFOMC"];
+        let allSettled = [];
+
+        for (const series of seriesToTry) {
+          try {
+            const params = { status: "settled", limit: "200", series_ticker: series };
+            const d = await kalshiFetch("/markets", params);
+            const markets = d.markets || [];
+            console.log(`[Replay] series_ticker=${series}: API returned ${markets.length} markets`, markets.slice(0, 3));
+            allSettled = allSettled.concat(markets);
+          } catch (e) {
+            console.log(`[Replay] series_ticker=${series} failed: ${e.message}`);
+          }
+        }
+
+        // Also try without series filter as fallback
+        if (allSettled.length === 0) {
+          const params = { status: "settled", limit: "200" };
+          const d = await kalshiFetch("/markets", params);
+          const markets = d.markets || [];
+          console.log(`[Replay] No series filter: API returned ${markets.length} markets`, markets.slice(0, 3));
+          allSettled = markets;
+        }
+
+        const settled = allSettled.filter(isMention).filter(m => m.result === "yes" || m.result === "no");
+        console.log(`[Replay] After isMention filter: ${settled.length} markets`, settled.slice(0, 3).map(m => ({ ticker: m.ticker, event_ticker: m.event_ticker })));
+
+        if (settled.length === 0 && allSettled.length > 0) {
+          const sample = allSettled.slice(0, 5).map(m => `${m.ticker} (event: ${m.event_ticker || "none"})`).join(", ");
+          setFetchError(`Found ${allSettled.length} settled markets but none matched mention filter. Samples: ${sample}`);
+        }
 
         // Group by event_ticker
         const grouped = {};
@@ -1155,14 +1196,15 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog }) {
           grouped[et].markets.push(m);
         }
         setEvents(grouped);
-        addLog(`Replay: loaded ${settled.length} settled markets in ${Object.keys(grouped).length} events`, "ok");
+        addLog(`Replay: loaded ${settled.length} settled markets in ${Object.keys(grouped).length} events`, settled.length > 0 ? "ok" : "warn");
       } catch (e) {
+        setFetchError("Failed to load events: " + e.message);
         addLog("Replay: failed to load events — " + e.message, "err");
       }
       setLoadingEvents(false);
     }
     load();
-  }, []);
+  }, [seriesFilter]);
 
   // Fetch candlesticks when a market is selected
   async function loadCandles(market) {
@@ -1376,7 +1418,10 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog }) {
             <div className="scan-pulse" /> Loading settled events...
           </div>
         ) : events && eventKeys.length === 0 ? (
-          <div className="empty"><div className="empty-msg">No settled KXTRUMPMENTION events found</div></div>
+          <div className="empty">
+            <div className="empty-msg">No settled mention events found</div>
+            {fetchError && <div style={{ marginTop: 8, fontSize: 11, color: "var(--amber)", maxWidth: 500, lineHeight: 1.6 }}>{fetchError}</div>}
+          </div>
         ) : (
           <select value={selectedEvent} onChange={e => { setSelectedEvent(e.target.value); setSelectedMarket(null); setCandles(null); }}
             style={{ width: "100%", padding: "8px 10px" }}>
