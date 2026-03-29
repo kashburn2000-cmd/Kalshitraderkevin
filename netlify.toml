@@ -7,6 +7,11 @@
   to = "/.netlify/functions/kalshi/:splat"
   status = 200
 
+[[redirects]]
+  from = "/transcripts"
+  to = "/.netlify/functions/transcripts"
+  status = 200
+
 [[headers]]
   for = "/*"
   [headers.values]

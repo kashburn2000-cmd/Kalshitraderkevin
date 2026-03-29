@@ -1090,25 +1090,72 @@ function BacktestTab({ results, backtesting, onRun, settled }) {
 // ── Base rates tab ────────────────────────────────────────────────────────────
 function BaseRatesTab({ baseRates, settled }) {
   const entries = Object.entries(baseRates).sort((a, b) => b[1].rate - a[1].rate);
+  const [speechFreqs, setSpeechFreqs] = useState(null);
+  const [loadingSpeech, setLoadingSpeech] = useState(false);
+  const [speechError, setSpeechError] = useState(null);
+
+  const fetchTranscripts = async () => {
+    setLoadingSpeech(true);
+    setSpeechError(null);
+    try {
+      const kws = Object.keys(baseRates).join(",");
+      const r = await fetch(`/transcripts?keywords=${encodeURIComponent(kws)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      if (data.error) throw new Error(data.error);
+      setSpeechFreqs(data);
+    } catch (e) {
+      setSpeechError(e.message);
+    } finally {
+      setLoadingSpeech(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="section-header">
         <div className="section-title">Base Rate Database</div>
-        <span style={{ fontSize: 12, color: "var(--text3)" }}>{entries.length} keywords · {settled.length} resolved markets</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 12, color: "var(--text3)" }}>{entries.length} keywords · {settled.length} resolved markets</span>
+          <button className={`btn ${loadingSpeech ? "" : "btn-primary"}`} onClick={fetchTranscripts} disabled={loadingSpeech}
+            style={{ fontSize: 11, padding: "5px 10px" }}>
+            {loadingSpeech ? "Fetching..." : "Transcript Freq"}
+          </button>
+        </div>
       </div>
+      {speechError && <div style={{ fontSize: 12, color: "var(--red)", padding: "6px 12px", background: "var(--red-dim)", borderRadius: "var(--r)" }}>{speechError}</div>}
+      {speechFreqs && (
+        <div style={{ display: "flex", gap: 16, fontSize: 11, color: "var(--text3)", alignItems: "center" }}>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: "var(--green)", display: "inline-block" }} /> Kalshi rate</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: "var(--blue)", display: "inline-block" }} /> Speech freq</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 10, height: 10, borderRadius: 2, background: "var(--amber)", display: "inline-block" }} /> Divergence &gt;15%</span>
+        </div>
+      )}
       <div className="card">
         <div className="card-title">Keyword Hit Rates (Bayesian-smoothed)</div>
         {entries.map(([kw, data]) => {
           const pct = data.rate;
           const color = pct > 0.7 ? "var(--green)" : pct > 0.4 ? "var(--amber)" : "var(--red)";
           const conf = data.n >= 8 ? "★★★" : data.n >= 3 ? "★★" : "★";
+          const sf = speechFreqs && speechFreqs[kw];
+          const diverges = sf && Math.abs(pct - sf.rate) > 0.15;
           return (
-            <div key={kw} className="br-row">
-              <div className="br-kw">{kw}</div>
-              <div className="br-bar-wrap">
-                <div className="br-bar" style={{ width: `${pct * 100}%`, background: color }} />
+            <div key={kw} className="br-row" style={diverges ? { background: "var(--amber-dim)", borderRadius: "var(--r)", padding: "6px 8px", margin: "-2px -8px" } : {}}>
+              <div className="br-kw">{kw}{diverges && <span style={{ color: "var(--amber)", fontSize: 9, marginLeft: 4 }}>MISPRICING?</span>}</div>
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+                <div className="br-bar-wrap">
+                  <div className="br-bar" style={{ width: `${pct * 100}%`, background: color }} />
+                </div>
+                {sf && (
+                  <div className="br-bar-wrap">
+                    <div className="br-bar" style={{ width: `${sf.rate * 100}%`, background: "var(--blue)" }} />
+                  </div>
+                )}
               </div>
-              <div className="br-pct" style={{ color }}>{(pct * 100).toFixed(0)}%</div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", minWidth: 44 }}>
+                <div className="br-pct" style={{ color }}>{(pct * 100).toFixed(0)}%</div>
+                {sf && <div className="br-pct" style={{ color: "var(--blue)", fontSize: 10 }}>{(sf.rate * 100).toFixed(0)}%</div>}
+              </div>
               <div className="br-n">{data.n === 0 ? <span style={{ color: "var(--amber)" }}>seed</span> : `n=${data.n}`}</div>
               <div style={{ fontSize: 10, color: "var(--text3)", minWidth: 30 }}>{conf}</div>
             </div>
@@ -1120,6 +1167,7 @@ function BaseRatesTab({ baseRates, settled }) {
         <div className="card-title">How to read this</div>
         <p>Each rate is the probability a keyword resolves YES, computed from resolved Kalshi markets using Bayesian smoothing (adds one pseudo-observation per side to prevent small samples from showing 0% or 100%).</p>
         <p style={{ marginTop: 8 }}>★ = seed only, ★★ = 3+ observations, ★★★ = 8+ observations. Only trade on ★★+ with meaningful edge.</p>
+        {speechFreqs && <p style={{ marginTop: 8 }}>Blue bars show actual keyword frequency in recent Trump speeches from the American Presidency Project. Rows highlighted in amber indicate &gt;15% divergence — potential mispricing signals.</p>}
       </div>
     </div>
   );
