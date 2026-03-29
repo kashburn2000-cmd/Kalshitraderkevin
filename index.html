@@ -393,6 +393,28 @@ function computeEdge(market, baseRates) {
   return { kw, fv: entry.rate, mid, edge, n: entry.n };
 }
 
+// ── Kelly Criterion position sizer ──────────────────────────────────────────
+function computeKellySize(fv, entryPrice, bankroll, method) {
+  if (method === "flat") return null;
+  const p = fv;           // probability of YES
+  const q = 1 - p;
+  const b = (1 - entryPrice) / entryPrice; // net odds for binary paying $1
+  if (b <= 0) return null;
+  const f = (p * b - q) / b; // Kelly fraction
+  if (f <= 0) return { kelly: 0, contracts: 0, negative: true };
+  // Cap at 20% of bankroll per position
+  const cappedF = Math.min(f, 0.20);
+  const kellyContracts = Math.floor((cappedF * bankroll) / entryPrice);
+  const halfKelly = Math.floor(kellyContracts / 2);
+  return {
+    kelly: kellyContracts,
+    half: halfKelly,
+    contracts: method === "kelly" ? kellyContracts : halfKelly,
+    fraction: cappedF,
+    negative: false,
+  };
+}
+
 // ── Log ───────────────────────────────────────────────────────────────────────
 function useLog() {
   const [lines, setLines] = useState([]);
@@ -425,6 +447,8 @@ function App() {
   const [seriesFilter, setSeriesFilter] = useState("KXTRUMPMENTION");
   const [minEdge, setMinEdge] = useState(0.08);
   const [maxSize, setMaxSize] = useState(10);
+  const [bankroll, setBankroll] = useState(100);
+  const [sizingMethod, setSizingMethod] = useState("halfkelly"); // "kelly" | "halfkelly" | "flat"
   const [apiError, setApiError] = useState(null);
   const [authStatus, setAuthStatus] = useState(null); // null | {ok, balance?, reason?}
   const [liveBalance, setLiveBalance] = useState(null);
@@ -466,6 +490,13 @@ function App() {
         const e = computeEdge(m, baseRates);
         if (!e || Math.abs(e.edge) < minEdge) return null;
         if (e.n < 3) return null; // confidence filter: require n≥3 observations
+        // Kelly filter: skip signals where Kelly is negative (no edge)
+        if (sizingMethod !== "flat") {
+          const side = e.edge > 0 ? "yes" : "no";
+          const entryPrice = side === "yes" ? e.mid : 1 - e.mid;
+          const ks = computeKellySize(e.fv, entryPrice, bankroll, sizingMethod);
+          if (ks && ks.negative) return null;
+        }
         return { market: m, ...e };
       }).filter(Boolean).sort((a, b) => Math.abs(b.edge) - Math.abs(a.edge));
 
@@ -566,12 +597,19 @@ function App() {
     const price = side === "yes" ? signal.mid : 1 - signal.mid;
     const priceCents = Math.max(1, Math.min(99, Math.round(price * 100)));
 
+    // Determine quantity based on sizing method
+    let qty = maxSize;
+    if (sizingMethod !== "flat") {
+      const ks = computeKellySize(signal.fv, price, bankroll, sizingMethod);
+      qty = (ks && ks.contracts > 0) ? ks.contracts : 1;
+    }
+
     if (mode === "live" && authStatus && authStatus.ok) {
-      addLog(`[LIVE] Placing ${side.toUpperCase()} order ${signal.market.ticker} @ ${priceCents}¢ qty=${maxSize}`, "ok");
+      addLog(`[LIVE] Placing ${side.toUpperCase()} order ${signal.market.ticker} @ ${priceCents}¢ qty=${qty}`, "ok");
       try {
-        const result = await placeRealOrder(signal.market.ticker, side, priceCents, maxSize);
+        const result = await placeRealOrder(signal.market.ticker, side, priceCents, qty);
         const orderId = result.order?.order_id || "live-" + Date.now();
-        const ord = { id: orderId, ticker: signal.market.ticker, side, price, qty: maxSize, kw: signal.kw, fv: signal.fv, ts: new Date().toISOString(), status: "open" };
+        const ord = { id: orderId, ticker: signal.market.ticker, side, price, qty, kw: signal.kw, fv: signal.fv, ts: new Date().toISOString(), status: "open" };
         setOrders(prev => [ord, ...prev]);
         setPositions(prev => [...prev, { ...ord, status: "open", pnl: 0, entryTime: new Date() }]);
         addLog(`[LIVE] Order placed: ${orderId}`, "ok");
@@ -582,10 +620,10 @@ function App() {
       }
     } else {
       // Paper mode
-      const ord = makePaperOrder(signal.market.ticker, side, price, maxSize, signal.kw, signal.fv);
+      const ord = makePaperOrder(signal.market.ticker, side, price, qty, signal.kw, signal.fv);
       setOrders(prev => [ord, ...prev]);
       setPositions(prev => [...prev, { ...ord, status: "open", pnl: 0, entryTime: new Date() }]);
-      addLog(`[PAPER] BUY ${side.toUpperCase()} ${signal.market.ticker} @ ${fmtPct(price)} qty=${maxSize}`, "ok");
+      addLog(`[PAPER] BUY ${side.toUpperCase()} ${signal.market.ticker} @ ${fmtPct(price)} qty=${qty}`, "ok");
     }
   }
 
@@ -741,12 +779,13 @@ function App() {
           {tab === "scanner" && <ScannerTab signals={signals} markets={markets} scanning={scanning} apiError={apiError}
             onScan={runScan} onAutoScan={toggleAutoScan} onTrade={placeOrder} minEdge={minEdge} mode={mode}
             autoScanActive={!!scanInterval.current} onToggleAlerts={toggleAlerts} alertActive={!!alertInterval.current}
-            newMarketAlert={newMarketAlert} onDismissAlert={() => setNewMarketAlert(null)} />}
+            newMarketAlert={newMarketAlert} onDismissAlert={() => setNewMarketAlert(null)}
+            bankroll={bankroll} sizingMethod={sizingMethod} />}
           {tab === "positions" && <PositionsTab positions={positions} onClose={closePosition} />}
           {tab === "orders" && <OrdersTab orders={orders} />}
           {tab === "backtest" && <BacktestTab results={backtestResults} backtesting={backtesting}
             onRun={runBacktest} settled={settled} />}
-          {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} seriesFilter={seriesFilter} />}
+          {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} seriesFilter={seriesFilter} bankroll={bankroll} sizingMethod={sizingMethod} />}
           {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} />}
         </div>
 
@@ -764,10 +803,25 @@ function App() {
               onChange={e => setMinEdge(Number(e.target.value) / 100)} style={{ marginTop: 6 }} />
           </div>
           <div className="config-item">
-            <div className="config-label">Position size: {maxSize} contracts</div>
-            <input type="range" min="1" max="100" step="1" value={maxSize}
-              onChange={e => setMaxSize(Number(e.target.value))} style={{ marginTop: 6 }} />
+            <div className="config-label">Sizing method</div>
+            <div className="mode-toggle" style={{ marginTop: 6, width: "100%" }}>
+              <div className={`mode-btn ${sizingMethod === "halfkelly" ? "active" : ""}`} onClick={() => setSizingMethod("halfkelly")} style={{ flex: 1, textAlign: "center" }}>½ Kelly</div>
+              <div className={`mode-btn ${sizingMethod === "kelly" ? "active" : ""}`} onClick={() => setSizingMethod("kelly")} style={{ flex: 1, textAlign: "center" }}>Kelly</div>
+              <div className={`mode-btn ${sizingMethod === "flat" ? "active" : ""}`} onClick={() => setSizingMethod("flat")} style={{ flex: 1, textAlign: "center" }}>Flat</div>
+            </div>
           </div>
+          <div className="config-item">
+            <div className="config-label">Bankroll ($)</div>
+            <input type="number" className="config-input" min="1" step="10" value={bankroll}
+              onChange={e => setBankroll(Math.max(1, Number(e.target.value) || 1))} style={{ width: "100%", marginTop: 4 }} />
+          </div>
+          {sizingMethod === "flat" && (
+            <div className="config-item">
+              <div className="config-label">Position size: {maxSize} contracts</div>
+              <input type="range" min="1" max="100" step="1" value={maxSize}
+                onChange={e => setMaxSize(Number(e.target.value))} style={{ marginTop: 6 }} />
+            </div>
+          )}
           <div className="config-item">
             <div className="config-label">Target exit</div>
             <div className="config-value">88¢</div>
@@ -802,7 +856,7 @@ function App() {
 }
 
 // ── Scanner tab ───────────────────────────────────────────────────────────────
-function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, onTrade, minEdge, mode, autoScanActive, onToggleAlerts, alertActive, newMarketAlert, onDismissAlert }) {
+function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, onTrade, minEdge, mode, autoScanActive, onToggleAlerts, alertActive, newMarketAlert, onDismissAlert, bankroll, sizingMethod }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="section-header">
@@ -848,6 +902,7 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
                   <th>Edge</th>
                   <th>Side</th>
                   <th>Sample N</th>
+                  <th>Size</th>
                   <th></th>
                 </tr>
               </thead>
@@ -861,6 +916,15 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
                     <td><span className={s.edge > 0 ? "edge-pos" : "edge-neg"}>{s.edge > 0 ? "+" : ""}{(s.edge * 100).toFixed(0)}¢</span></td>
                     <td><span className={`badge ${s.edge > 0 ? "badge-yes" : "badge-no"}`}>{s.edge > 0 ? "YES" : "NO"}</span></td>
                     <td><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: s.n >= 5 ? "var(--green)" : s.n >= 2 ? "var(--amber)" : "var(--red)" }}>{s.n === 0 ? "seed" : `n=${s.n}`}</span></td>
+                    <td>{(() => {
+                      if (sizingMethod === "flat") return <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)" }}>flat</span>;
+                      const side = s.edge > 0 ? "yes" : "no";
+                      const entryPrice = side === "yes" ? s.mid : 1 - s.mid;
+                      const ks = computeKellySize(s.fv, entryPrice, bankroll, sizingMethod);
+                      if (!ks || ks.negative) return <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--red)" }}>—</span>;
+                      const label = sizingMethod === "kelly" ? "Kelly" : "½Kelly";
+                      return <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--green)" }}>{label}: {ks.contracts}</span>;
+                    })()}</td>
                     <td>
                       <button className="btn btn-primary" style={{ padding: "4px 10px", fontSize: 11 }} onClick={() => onTrade(s)}>
                         {mode === "paper" ? "Paper Trade" : "Trade"}
@@ -1126,7 +1190,7 @@ function BaseRatesTab({ baseRates, settled }) {
 }
 
 // ── Replay tab ────────────────────────────────────────────────────────────────
-function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
+function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter, bankroll, sizingMethod }) {
   const [events, setEvents] = useState(null); // { [event_ticker]: { label, markets[] } }
   const [selectedEvent, setSelectedEvent] = useState("");
   const [selectedMarket, setSelectedMarket] = useState(null);
@@ -1505,7 +1569,7 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
       {selectedMarket && sig && !loadingCandles && (
         <div className="card">
           <div className="card-title">Signal Analysis</div>
-          <div className="metrics" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+          <div className="metrics" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
             <div className="metric">
               <div className="metric-label">Entry Price</div>
               <div className="metric-value" style={{ fontSize: 18 }}>{fmtPct(sig.entryPrice)}</div>
@@ -1532,6 +1596,17 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
                 {fmtDollar(sig.pnl)}
               </div>
               <div className="metric-sub">{maxSize} contracts</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Kelly Sizing</div>
+              <div className="metric-value" style={{ fontSize: 14 }}>{(() => {
+                const ks = computeKellySize(sig.fv, sig.entryPrice, bankroll, "kelly");
+                if (!ks || ks.negative) return <span style={{ color: "var(--red)" }}>No edge</span>;
+                return <span style={{ color: "var(--green)", fontFamily: "var(--font-mono)" }}>
+                  {ks.kelly}K / {ks.half}½K
+                </span>;
+              })()}</div>
+              <div className="metric-sub">${bankroll} bankroll</div>
             </div>
             <div className="metric">
               <div className="metric-label">Verdict</div>
