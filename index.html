@@ -1131,11 +1131,14 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
   const [selectedEvent, setSelectedEvent] = useState("");
   const [selectedMarket, setSelectedMarket] = useState(null);
   const [candles, setCandles] = useState(null);
+  const [trades, setTrades] = useState(null);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [loadingCandles, setLoadingCandles] = useState(false);
   const [fetchError, setFetchError] = useState(null);
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
+  const volumeChartRef = useRef(null);
+  const volumeChartInstance = useRef(null);
 
   const TARGET_EXIT = 0.88;
   const STOP_LOSS = 0.25;
@@ -1206,21 +1209,66 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
     load();
   }, [seriesFilter]);
 
-  // Fetch candlesticks when a market is selected
+  // Fetch candlesticks (routing live vs historical) and trades when a market is selected
   async function loadCandles(market) {
     setSelectedMarket(market);
     setCandles(null);
+    setTrades(null);
     setLoadingCandles(true);
     try {
       const closeTs = market.close_time ? Math.floor(new Date(market.close_time).getTime() / 1000) : Math.floor(Date.now() / 1000);
       const startTs = closeTs - 48 * 3600;
-      const d = await kalshiFetch(`/series/${market.series_ticker}/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
-      const sticks = d.candlesticks || [];
+
+      // Determine if market is historical by checking cutoff
+      let useHistorical = false;
+      try {
+        const cutoff = await kalshiFetch("/historical/cutoff");
+        const cutoffTs = cutoff.market_settled_ts || 0;
+        if (cutoffTs && closeTs < cutoffTs) {
+          useHistorical = true;
+        }
+      } catch (e) {
+        console.log("[Replay] cutoff check failed, trying live endpoint:", e.message);
+      }
+
+      // Fetch candlesticks from the right endpoint
+      let sticks = [];
+      if (useHistorical) {
+        try {
+          const d = await kalshiFetch(`/historical/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
+          sticks = d.candlesticks || [];
+          addLog(`Replay: fetched ${sticks.length} historical candles for ${market.ticker}`, "ok");
+        } catch (e) {
+          addLog("Replay: historical candlestick fetch failed — " + e.message, "warn");
+        }
+      }
+      // Try live endpoint if historical didn't work or wasn't needed
+      if (sticks.length === 0) {
+        try {
+          const d = await kalshiFetch(`/series/${market.series_ticker}/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
+          sticks = d.candlesticks || [];
+          if (sticks.length > 0) addLog(`Replay: fetched ${sticks.length} live candles for ${market.ticker}`, "ok");
+        } catch (e) {
+          addLog("Replay: live candlestick fetch failed — " + e.message, "warn");
+        }
+      }
+      if (sticks.length === 0) addLog(`Replay: no candlestick data found for ${market.ticker}`, "warn");
       setCandles(sticks);
-      addLog(`Replay: fetched ${sticks.length} candles for ${market.ticker}`, "ok");
+
+      // Fetch individual trades
+      try {
+        const td = await kalshiFetch("/historical/trades", { ticker: market.ticker, limit: "500" });
+        const tradeList = td.trades || [];
+        setTrades(tradeList);
+        addLog(`Replay: fetched ${tradeList.length} trades for ${market.ticker}`, "ok");
+      } catch (e) {
+        addLog("Replay: trade fetch failed — " + e.message, "warn");
+        setTrades([]);
+      }
     } catch (e) {
-      addLog("Replay: candlestick fetch failed — " + e.message, "err");
+      addLog("Replay: data fetch failed — " + e.message, "err");
       setCandles([]);
+      setTrades([]);
     }
     setLoadingCandles(false);
   }
@@ -1411,6 +1459,72 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
     };
   }, [candles, selectedMarket]);
 
+  // Render volume chart when candles change
+  useEffect(() => {
+    if (!candles || candles.length === 0 || !volumeChartRef.current) return;
+    if (volumeChartInstance.current) {
+      volumeChartInstance.current.destroy();
+      volumeChartInstance.current = null;
+    }
+
+    const sorted = [...candles].sort((a, b) => new Date(a.end_period_ts || a.t) - new Date(b.end_period_ts || b.t));
+    const labels = sorted.map(c => {
+      const d = new Date(c.end_period_ts || c.t);
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+    });
+    const volumes = sorted.map(c => parseFloat(c.volume || c.volume_fp || 0));
+
+    const ctx = volumeChartRef.current.getContext("2d");
+    volumeChartInstance.current = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          label: "Volume",
+          data: volumes,
+          backgroundColor: "rgba(61,158,255,0.35)",
+          borderColor: "rgba(61,158,255,0.6)",
+          borderWidth: 1,
+          borderRadius: 2,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 400 },
+        scales: {
+          x: {
+            ticks: { color: "#545b64", font: { family: "'DM Mono', monospace", size: 10 }, maxTicksLimit: 12 },
+            grid: { color: "rgba(255,255,255,0.05)" },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: { color: "#545b64", font: { family: "'DM Mono', monospace", size: 10 } },
+            grid: { color: "rgba(255,255,255,0.05)" },
+          }
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: "#1e2227",
+            borderColor: "rgba(255,255,255,0.12)",
+            borderWidth: 1,
+            titleFont: { family: "'DM Mono', monospace", size: 11 },
+            bodyFont: { family: "'DM Mono', monospace", size: 11 },
+            callbacks: { label: ctx => ctx.parsed.y.toLocaleString() + " contracts" }
+          }
+        }
+      }
+    });
+
+    return () => {
+      if (volumeChartInstance.current) {
+        volumeChartInstance.current.destroy();
+        volumeChartInstance.current = null;
+      }
+    };
+  }, [candles]);
+
   const eventKeys = events ? Object.keys(events) : [];
   const currentMarkets = selectedEvent && events ? (events[selectedEvent]?.markets || []) : [];
   const sig = selectedMarket ? computeSignalData(selectedMarket) : null;
@@ -1434,7 +1548,7 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
             {fetchError && <div style={{ marginTop: 8, fontSize: 11, color: "var(--amber)", maxWidth: 500, lineHeight: 1.6 }}>{fetchError}</div>}
           </div>
         ) : (
-          <select value={selectedEvent} onChange={e => { setSelectedEvent(e.target.value); setSelectedMarket(null); setCandles(null); }}
+          <select value={selectedEvent} onChange={e => { setSelectedEvent(e.target.value); setSelectedMarket(null); setCandles(null); setTrades(null); }}
             style={{ width: "100%", padding: "8px 10px" }}>
             <option value="">Choose a past event...</option>
             {eventKeys.map(et => (
@@ -1503,8 +1617,53 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
         </div>
       )}
 
-      {/* Signal overlay panel */}
-      {selectedMarket && sig && !loadingCandles && (
+      {/* Volume chart */}
+      {selectedMarket && candles && candles.length > 0 && !loadingCandles && (
+        <div className="card">
+          <div className="card-title">Volume</div>
+          <div style={{ height: 150, position: "relative" }}>
+            <canvas ref={volumeChartRef} />
+          </div>
+        </div>
+      )}
+
+      {/* Trades feed + Signal analysis side by side */}
+      {selectedMarket && !loadingCandles && (
+        <div style={{ display: "grid", gridTemplateColumns: trades && trades.length > 0 ? "1fr 1fr" : "1fr", gap: 16 }}>
+          {/* Individual trades feed */}
+          {trades && trades.length > 0 && (
+            <div className="card" style={{ maxHeight: 400, display: "flex", flexDirection: "column" }}>
+              <div className="card-title">Trade Feed ({trades.length} trades)</div>
+              <div style={{ overflow: "auto", flex: 1 }}>
+                <table style={{ fontSize: 12 }}>
+                  <thead><tr><th>Time</th><th>Price</th><th>Size</th></tr></thead>
+                  <tbody>
+                    {[...trades].sort((a, b) => new Date(a.created_time || a.ts) - new Date(b.created_time || b.ts)).map((t, i) => {
+                      const time = new Date(t.created_time || t.ts);
+                      const price = t.yes_price != null ? t.yes_price : t.price;
+                      const priceCents = typeof price === "number" ? (price < 1 ? price * 100 : price) : parseFloat(price) * 100 || 0;
+                      const size = t.count || t.size || 1;
+                      return (
+                        <tr key={i}>
+                          <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text2)", whiteSpace: "nowrap" }}>
+                            {time.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                          </td>
+                          <td style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                            <span className="price">{priceCents.toFixed(0)}¢</span>
+                          </td>
+                          <td style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text2)" }}>{size}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Signal analysis panel */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {sig && (
         <div className="card">
           <div className="card-title">Signal Analysis</div>
           <div className="metrics" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
@@ -1545,11 +1704,13 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
           </div>
         </div>
       )}
-
-      {selectedMarket && !sig && !loadingCandles && (
+      {!sig && (
         <div className="card">
           <div className="card-title">Signal Analysis</div>
           <div className="empty"><div className="empty-msg">No signal data — keyword not in base rate database or no price data available</div></div>
+        </div>
+      )}
+          </div>
         </div>
       )}
     </div>
