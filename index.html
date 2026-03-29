@@ -196,6 +196,31 @@
   .section-title { font-family: var(--font-head); font-weight: 700; font-size: 18px; color: var(--text); }
 
   input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  /* Toggle switch */
+  .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: var(--bg4); border: 1px solid var(--border2); border-radius: 10px; transition: 0.2s; }
+  .toggle-slider::before { content: ""; position: absolute; height: 14px; width: 14px; left: 2px; bottom: 2px; background: var(--text3); border-radius: 50%; transition: 0.2s; }
+  .toggle input:checked + .toggle-slider { background: var(--green-dim); border-color: var(--green); }
+  .toggle input:checked + .toggle-slider::before { transform: translateX(16px); background: var(--green); }
+
+  /* Correlation heatmap */
+  .corr-matrix { display: grid; gap: 1px; font-size: 10px; overflow-x: auto; }
+  .corr-cell { width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 9px; border-radius: 2px; cursor: default; position: relative; }
+  .corr-cell:hover { outline: 1px solid var(--text); z-index: 1; }
+  .corr-label { font-family: var(--font-mono); font-size: 9px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 4px; }
+  .corr-label-y { text-align: right; }
+  .corr-insight { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.6; }
+  .corr-insight .kw { color: var(--blue); font-family: var(--font-mono); font-size: 11px; }
+  .corr-insight .pct { color: var(--green); font-family: var(--font-mono); font-weight: 500; }
+
+  /* CORR badge */
+  .badge-corr { background: var(--blue-dim); color: var(--blue); font-size: 9px; padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-weight: 500; letter-spacing: 0.05em; margin-left: 4px; }
+
+  /* Transcript input */
+  textarea.transcript-input { width: 100%; background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r); color: var(--text); font-family: var(--font-mono); font-size: 12px; padding: 8px 10px; resize: vertical; min-height: 60px; outline: none; }
+  textarea.transcript-input:focus { border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -402,6 +427,104 @@ function useLog() {
   return [lines, add];
 }
 
+// ── Correlation computation ──────────────────────────────────────────────────
+function computeCorrelations(settledMarkets) {
+  // Group markets by event_ticker (each event = one speech)
+  const events = {};
+  for (const m of settledMarkets) {
+    const et = m.event_ticker || m.ticker;
+    if (!events[et]) events[et] = [];
+    events[et].push(m);
+  }
+
+  // For each event, collect keyword → result mapping
+  const eventKeywords = {}; // { event_ticker: { keyword: "yes"|"no" } }
+  for (const [et, markets] of Object.entries(events)) {
+    eventKeywords[et] = {};
+    for (const m of markets) {
+      const kw = extractKw(m);
+      if (m.result === "yes" || m.result === "no") {
+        eventKeywords[et][kw] = m.result;
+      }
+    }
+  }
+
+  // Collect all keywords that appear in at least 2 events
+  const kwCounts = {};
+  for (const kwMap of Object.values(eventKeywords)) {
+    for (const kw of Object.keys(kwMap)) {
+      kwCounts[kw] = (kwCounts[kw] || 0) + 1;
+    }
+  }
+  const keywords = Object.keys(kwCounts).filter(k => kwCounts[k] >= 2).sort();
+
+  // Compute pairwise correlation: P(A=YES | B=YES)
+  const matrix = {}; // matrix[kwA][kwB] = { bothYes, bothNo, split, coAppear, corrAgivenB, corrBgivenA }
+  for (let i = 0; i < keywords.length; i++) {
+    const kwA = keywords[i];
+    if (!matrix[kwA]) matrix[kwA] = {};
+    for (let j = 0; j < keywords.length; j++) {
+      const kwB = keywords[j];
+      if (i === j) {
+        matrix[kwA][kwB] = { bothYes: 0, bothNo: 0, split: 0, coAppear: 0, corr: 1 };
+        continue;
+      }
+      let bothYes = 0, bothNo = 0, split = 0, bYesCount = 0;
+      for (const kwMap of Object.values(eventKeywords)) {
+        if (kwMap[kwA] !== undefined && kwMap[kwB] !== undefined) {
+          if (kwMap[kwA] === "yes" && kwMap[kwB] === "yes") bothYes++;
+          else if (kwMap[kwA] === "no" && kwMap[kwB] === "no") bothNo++;
+          else split++;
+          if (kwMap[kwB] === "yes") bYesCount++;
+        }
+      }
+      const coAppear = bothYes + bothNo + split;
+      // P(A=YES | B=YES): of times B was YES, how often was A also YES?
+      const corr = bYesCount > 0 ? bothYes / bYesCount : 0;
+      matrix[kwA][kwB] = { bothYes, bothNo, split, coAppear, corr };
+    }
+  }
+
+  // Top correlations (exclude self and require coAppear >= 2)
+  const pairs = [];
+  const seen = new Set();
+  for (const kwA of keywords) {
+    for (const kwB of keywords) {
+      if (kwA >= kwB) continue;
+      const key = kwA + "|" + kwB;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const d = matrix[kwA][kwB];
+      if (d.coAppear < 2) continue;
+      // Use the average of both directional correlations
+      const corrAB = d.corr;
+      const corrBA = matrix[kwB][kwA].corr;
+      const avgCorr = (corrAB + corrBA) / 2;
+      pairs.push({ kwA, kwB, corr: avgCorr, corrAB, corrBA, coAppear: d.coAppear, bothYes: d.bothYes });
+    }
+  }
+  pairs.sort((a, b) => b.corr - a.corr);
+
+  return { keywords, matrix, topPairs: pairs.slice(0, 5), allPairs: pairs };
+}
+
+// Check if a keyword has a correlated keyword found in transcript
+function getCorrSignals(kw, correlations, transcriptKws) {
+  if (!correlations || !transcriptKws || transcriptKws.size === 0) return [];
+  const { matrix, keywords } = correlations;
+  if (!matrix[kw]) return [];
+  const signals = [];
+  for (const otherKw of keywords) {
+    if (otherKw === kw) continue;
+    if (!transcriptKws.has(otherKw)) continue;
+    const d = matrix[kw][otherKw];
+    if (d && d.coAppear >= 2 && d.corr >= 0.5) {
+      signals.push({ fromKw: otherKw, corr: d.corr });
+    }
+  }
+  return signals;
+}
+
 // ── Simulated paper order book ────────────────────────────────────────────────
 let orderIdSeq = 1;
 function makePaperOrder(ticker, side, price, qty, kw, fv) {
@@ -429,6 +552,10 @@ function App() {
   const [authStatus, setAuthStatus] = useState(null); // null | {ok, balance?, reason?}
   const [liveBalance, setLiveBalance] = useState(null);
   const [lastScan, setLastScan] = useState(null);
+  const [correlations, setCorrelations] = useState(null);
+  const [transcriptText, setTranscriptText] = useState("");
+  const [alertEmail, setAlertEmail] = useState(() => localStorage.getItem("alertEmail") || "");
+  const [alertsEnabled, setAlertsEnabled] = useState(() => localStorage.getItem("alertsEnabled") === "true");
   const scanInterval = useRef(null);
   const alertInterval = useRef(null);
   const knownTickers = useRef(new Set());
@@ -451,6 +578,22 @@ function App() {
 
   const totalPnl = positions.reduce((s, p) => s + (p.pnl || 0), 0);
   const openExposure = positions.filter(p => p.status === "open").reduce((s, p) => s + p.price * p.qty, 0);
+
+  // Parse transcript into keyword set for correlation signals
+  const transcriptKws = React.useMemo(() => {
+    if (!transcriptText.trim()) return new Set();
+    const text = transcriptText.toLowerCase();
+    const kws = new Set();
+    // Match against known base rate keywords
+    for (const kw of Object.keys(baseRates)) {
+      if (text.includes(kw)) kws.add(kw);
+    }
+    return kws;
+  }, [transcriptText, baseRates]);
+
+  // Save alert settings to localStorage
+  useEffect(() => { localStorage.setItem("alertEmail", alertEmail); }, [alertEmail]);
+  useEffect(() => { localStorage.setItem("alertsEnabled", alertsEnabled.toString()); }, [alertsEnabled]);
 
   // Scan
   async function runScan() {
@@ -540,6 +683,11 @@ function App() {
 
       const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
       const winRate = trades.length ? trades.filter(t => t.correct).length / trades.length : 0;
+      // Compute correlations from settled data
+      const corr = computeCorrelations(s);
+      setCorrelations(corr);
+      addLog(`Correlations: ${corr.keywords.length} keywords, ${corr.topPairs.length} top pairs`, "ok");
+
       setBacktestResults({ trades, totalPnl, winRate, keywords: merged, settled: s.length });
       addLog(`Backtest complete: ${trades.length} trades, EV=${fmtDollar(totalPnl)}`, totalPnl > 0 ? "ok" : "warn");
     } catch (e) {
@@ -741,13 +889,15 @@ function App() {
           {tab === "scanner" && <ScannerTab signals={signals} markets={markets} scanning={scanning} apiError={apiError}
             onScan={runScan} onAutoScan={toggleAutoScan} onTrade={placeOrder} minEdge={minEdge} mode={mode}
             autoScanActive={!!scanInterval.current} onToggleAlerts={toggleAlerts} alertActive={!!alertInterval.current}
-            newMarketAlert={newMarketAlert} onDismissAlert={() => setNewMarketAlert(null)} />}
+            newMarketAlert={newMarketAlert} onDismissAlert={() => setNewMarketAlert(null)}
+            correlations={correlations} transcriptKws={transcriptKws}
+            transcriptText={transcriptText} onTranscriptChange={setTranscriptText} />}
           {tab === "positions" && <PositionsTab positions={positions} onClose={closePosition} />}
           {tab === "orders" && <OrdersTab orders={orders} />}
           {tab === "backtest" && <BacktestTab results={backtestResults} backtesting={backtesting}
             onRun={runBacktest} settled={settled} />}
           {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} seriesFilter={seriesFilter} />}
-          {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} />}
+          {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} correlations={correlations} />}
         </div>
 
         {/* Right panel — config */}
@@ -790,6 +940,38 @@ function App() {
             </div>
           )}
 
+          <div className="panel-header" style={{ marginTop: 12 }}>Alert Settings</div>
+          <div className="config-item">
+            <div className="config-label">Email address</div>
+            <input type="text" className="config-input" value={alertEmail} placeholder="you@example.com"
+              onChange={e => setAlertEmail(e.target.value)} style={{ width: "100%", marginTop: 4 }} />
+          </div>
+          <div className="config-item" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div>
+              <div className="config-label">Email alerts</div>
+              <div style={{ fontSize: 11, color: "var(--text3)" }}>{alertsEnabled ? "Enabled" : "Disabled"}</div>
+            </div>
+            <label className="toggle">
+              <input type="checkbox" checked={alertsEnabled} onChange={e => setAlertsEnabled(e.target.checked)} />
+              <span className="toggle-slider"></span>
+            </label>
+          </div>
+          <div className="config-item">
+            <button className="btn" style={{ width: "100%", justifyContent: "center" }}
+              onClick={async () => {
+                if (!alertEmail) { addLog("Set an email address first", "warn"); return; }
+                addLog("Sending test alert...", "info");
+                try {
+                  const r = await fetch(`/alert?test=true&email=${encodeURIComponent(alertEmail)}`);
+                  const d = await r.json();
+                  if (d.ok) addLog("Test email sent!", "ok");
+                  else addLog("Test failed: " + (d.error || "Unknown error"), "err");
+                } catch(e) { addLog("Test failed: " + e.message, "err"); }
+              }}>
+              Test Alert
+            </button>
+          </div>
+
           <div style={{ padding: "12px 16px", marginTop: "auto" }}>
             <div style={{ fontSize: 11, color: "var(--text3)", lineHeight: 1.6 }}>
               Market data via Kalshi public API. No authentication required for scanning. Paper trading is fully simulated.
@@ -802,7 +984,7 @@ function App() {
 }
 
 // ── Scanner tab ───────────────────────────────────────────────────────────────
-function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, onTrade, minEdge, mode, autoScanActive, onToggleAlerts, alertActive, newMarketAlert, onDismissAlert }) {
+function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, onTrade, minEdge, mode, autoScanActive, onToggleAlerts, alertActive, newMarketAlert, onDismissAlert, correlations, transcriptKws, transcriptText, onTranscriptChange }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="section-header">
@@ -819,6 +1001,21 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
             {alertActive ? "🔔 Alerts ON" : "🔕 Alerts"}
           </button>
         </div>
+      </div>
+
+      {/* Live Monitor transcript input */}
+      <div className="card">
+        <div className="card-title">Live Monitor — Transcript Input</div>
+        <textarea className="transcript-input" rows={3} placeholder="Paste live speech transcript here to activate correlation signals..."
+          value={transcriptText} onChange={e => onTranscriptChange(e.target.value)} />
+        {transcriptKws.size > 0 && (
+          <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 11, color: "var(--text3)" }}>Detected:</span>
+            {[...transcriptKws].map(kw => (
+              <span key={kw} className="badge badge-yes" style={{ fontSize: 10 }}>{kw}</span>
+            ))}
+          </div>
+        )}
       </div>
 
       {newMarketAlert && (
@@ -852,10 +1049,15 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
                 </tr>
               </thead>
               <tbody>
-                {signals.map((s, i) => (
+                {signals.map((s, i) => {
+                  const corrSigs = getCorrSignals(s.kw, correlations, transcriptKws);
+                  return (
                   <tr key={i}>
                     <td><span className="ticker">{s.market.ticker.slice(0, 22)}</span></td>
-                    <td><span className="keyword">{s.kw}</span></td>
+                    <td>
+                      <span className="keyword">{s.kw}</span>
+                      {corrSigs.length > 0 && <span className="badge-corr" title={`Correlated with: ${corrSigs.map(c => c.fromKw).join(", ")}`}>CORR</span>}
+                    </td>
                     <td><span className="price">{fmtPct(s.mid)}</span></td>
                     <td><span className="price">{fmtPct(s.fv)}</span></td>
                     <td><span className={s.edge > 0 ? "edge-pos" : "edge-neg"}>{s.edge > 0 ? "+" : ""}{(s.edge * 100).toFixed(0)}¢</span></td>
@@ -867,7 +1069,8 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1088,7 +1291,7 @@ function BacktestTab({ results, backtesting, onRun, settled }) {
 }
 
 // ── Base rates tab ────────────────────────────────────────────────────────────
-function BaseRatesTab({ baseRates, settled }) {
+function BaseRatesTab({ baseRates, settled, correlations }) {
   const entries = Object.entries(baseRates).sort((a, b) => b[1].rate - a[1].rate);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1116,12 +1319,108 @@ function BaseRatesTab({ baseRates, settled }) {
         })}
         {entries.length === 0 && <div className="empty"><div className="empty-msg">Run the backtester to populate real base rates</div></div>}
       </div>
+
+      {/* Correlations section */}
+      <CorrelationsSection correlations={correlations} />
+
       <div className="card" style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.8 }}>
         <div className="card-title">How to read this</div>
         <p>Each rate is the probability a keyword resolves YES, computed from resolved Kalshi markets using Bayesian smoothing (adds one pseudo-observation per side to prevent small samples from showing 0% or 100%).</p>
         <p style={{ marginTop: 8 }}>★ = seed only, ★★ = 3+ observations, ★★★ = 8+ observations. Only trade on ★★+ with meaningful edge.</p>
       </div>
     </div>
+  );
+}
+
+// ── Correlations section ─────────────────────────────────────────────────────
+function CorrelationsSection({ correlations }) {
+  if (!correlations || correlations.keywords.length < 2) {
+    return (
+      <div className="card">
+        <div className="card-title">Correlations</div>
+        <div className="empty">
+          <div className="empty-icon">◈</div>
+          <div className="empty-msg">Run the backtester first to compute keyword correlations from resolved market data</div>
+        </div>
+      </div>
+    );
+  }
+
+  const { keywords, matrix, topPairs } = correlations;
+  const n = keywords.length;
+  const maxDisplay = Math.min(n, 15); // Cap matrix size for readability
+  const displayKws = keywords.slice(0, maxDisplay);
+
+  // Color function: green = highly correlated, gray = uncorrelated, red = inversely correlated
+  function corrColor(val) {
+    if (val >= 0.7) return `rgba(0, 217, 126, ${0.3 + val * 0.5})`;
+    if (val >= 0.4) return `rgba(255, 184, 48, ${0.15 + val * 0.3})`;
+    if (val >= 0.2) return `rgba(138, 144, 153, ${0.1 + val * 0.2})`;
+    return `rgba(255, 77, 77, ${0.1 + (1 - val) * 0.3})`;
+  }
+
+  function corrTextColor(val) {
+    if (val >= 0.7) return "#00d97e";
+    if (val >= 0.4) return "#ffb830";
+    if (val >= 0.2) return "#8a9099";
+    return "#ff4d4d";
+  }
+
+  return (
+    <>
+      <div className="card">
+        <div className="card-title">Correlation Matrix — Keyword Co-occurrence Heatmap</div>
+        <div style={{ overflowX: "auto" }}>
+          <div className="corr-matrix" style={{ gridTemplateColumns: `80px repeat(${displayKws.length}, 1fr)`, minWidth: displayKws.length * 36 + 80 }}>
+            {/* Header row */}
+            <div></div>
+            {displayKws.map(kw => (
+              <div key={`h-${kw}`} className="corr-label" style={{ textAlign: "center", transform: "rotate(-45deg)", transformOrigin: "center", height: 50, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>{kw}</div>
+            ))}
+            {/* Data rows */}
+            {displayKws.map(kwA => (
+              <React.Fragment key={`r-${kwA}`}>
+                <div className="corr-label corr-label-y">{kwA}</div>
+                {displayKws.map(kwB => {
+                  const d = matrix[kwA] && matrix[kwA][kwB];
+                  if (!d) return <div key={`c-${kwA}-${kwB}`} className="corr-cell" style={{ background: "var(--bg4)" }}>—</div>;
+                  const val = kwA === kwB ? 1 : d.corr;
+                  return (
+                    <div key={`c-${kwA}-${kwB}`} className="corr-cell"
+                      style={{ background: corrColor(val), color: corrTextColor(val) }}
+                      title={kwA === kwB ? `${kwA} (self)` : `${kwA} + ${kwB}: ${(val * 100).toFixed(0)}% co-occurrence (n=${d.coAppear})`}>
+                      {kwA === kwB ? "—" : d.coAppear >= 2 ? (val * 100).toFixed(0) : "·"}
+                    </div>
+                  );
+                })}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+        {n > maxDisplay && <div style={{ fontSize: 11, color: "var(--text3)", marginTop: 8 }}>Showing top {maxDisplay} of {n} keywords</div>}
+      </div>
+
+      {topPairs.length > 0 && (
+        <div className="card">
+          <div className="card-title">Top 5 Strongest Positive Correlations</div>
+          {topPairs.map((p, i) => (
+            <div key={i} className="corr-insight">
+              <span className="kw">{p.kwA}</span>
+              {" + "}
+              <span className="kw">{p.kwB}</span>
+              {": "}
+              <span className="pct">{(p.corr * 100).toFixed(0)}% co-occurrence</span>
+              {" — if "}
+              <span className="kw">{p.kwA}</span>
+              {" resolves YES, "}
+              <span className="kw">{p.kwB}</span>
+              {" likely YES too"}
+              <span style={{ fontSize: 10, color: "var(--text3)", marginLeft: 8 }}>(n={p.coAppear})</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

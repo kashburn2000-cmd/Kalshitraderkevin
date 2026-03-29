@@ -7,6 +7,14 @@
   to = "/.netlify/functions/kalshi/:splat"
   status = 200
 
+[functions."alert"]
+  schedule = "*/5 * * * *"
+
+[[redirects]]
+  from = "/alert"
+  to = "/.netlify/functions/alert"
+  status = 200
+
 [[headers]]
   for = "/*"
   [headers.values]
