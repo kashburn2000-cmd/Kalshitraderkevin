@@ -679,6 +679,7 @@ function App() {
           <div className="sidebar-section">Trading</div>
           {[
             { id: "scanner", icon: "◎", label: "Scanner", badge: signals.length > 0 ? signals.length : null },
+            { id: "positioning", icon: "◆", label: "Positioning" },
             { id: "positions", icon: "▣", label: "Positions", badge: positions.filter(p => p.status === "open").length || null },
             { id: "orders", icon: "≡", label: "Order Log", badge: null },
           ].map(item => (
@@ -742,6 +743,7 @@ function App() {
             onScan={runScan} onAutoScan={toggleAutoScan} onTrade={placeOrder} minEdge={minEdge} mode={mode}
             autoScanActive={!!scanInterval.current} onToggleAlerts={toggleAlerts} alertActive={!!alertInterval.current}
             newMarketAlert={newMarketAlert} onDismissAlert={() => setNewMarketAlert(null)} />}
+          {tab === "positioning" && <PositioningTab seriesFilter={seriesFilter} addLog={addLog} />}
           {tab === "positions" && <PositionsTab positions={positions} onClose={closePosition} />}
           {tab === "orders" && <OrdersTab orders={orders} />}
           {tab === "backtest" && <BacktestTab results={backtestResults} backtesting={backtesting}
@@ -797,6 +799,188 @@ function App() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Positioning tab ──────────────────────────────────────────────────────────
+function PositioningTab({ seriesFilter, addLog }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function fetchPositioningData() {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = { status: "open", limit: "200" };
+      if (seriesFilter) params.series_ticker = seriesFilter;
+      const d = await kalshiFetch("/markets", params);
+      const openMarkets = (d.markets || []).filter(isMention);
+      addLog(`Positioning: found ${openMarkets.length} open markets`, "ok");
+
+      const results = await Promise.all(openMarkets.map(async m => {
+        const kw = extractKw(m);
+        const bid = parseFloat(m.yes_bid_dollars) || null;
+        const ask = parseFloat(m.yes_ask_dollars) || null;
+        const mid = bid !== null && ask !== null ? (bid + ask) / 2 : (bid || ask || 0);
+        const volume = parseFloat(m.volume_fp || m.volume || 0);
+        const createdTime = m.created_time || m.open_time || null;
+        const closeTime = m.close_time || null;
+
+        // Fetch candlesticks for sparkline and opening price
+        let openPrice = null;
+        let sparkData = [];
+        try {
+          // Try series candlestick endpoint first
+          const seriesTicker = m.series_ticker || seriesFilter || "";
+          let sticks = [];
+          if (seriesTicker) {
+            try {
+              const cd = await kalshiFetch(`/series/${seriesTicker}/markets/${m.ticker}/candlesticks`, { period_interval: "60" });
+              sticks = cd.candlesticks || [];
+            } catch {}
+          }
+          // Fallback to market candlesticks
+          if (sticks.length === 0) {
+            const cd = await kalshiFetch(`/markets/${m.ticker}/candlesticks`, { period_interval: "60" });
+            sticks = cd.candlesticks || [];
+          }
+          if (sticks.length > 0) {
+            const sorted = [...sticks].sort((a, b) => new Date(a.end_period_ts || a.t) - new Date(b.end_period_ts || b.t));
+            const first = sorted[0];
+            openPrice = first.yes_open != null ? first.yes_open : first.open != null ? first.open : first.price != null ? first.price : null;
+            if (typeof openPrice === "string") openPrice = parseFloat(openPrice);
+            // Sample ~15 evenly spaced points for sparkline
+            const step = Math.max(1, Math.floor(sorted.length / 15));
+            for (let i = 0; i < sorted.length; i += step) {
+              const c = sorted[i];
+              const p = c.yes_close != null ? c.yes_close : c.close != null ? c.close : c.price != null ? c.price : c.yes_price;
+              sparkData.push(typeof p === "number" ? p : parseFloat(p) || 0);
+            }
+            if (sparkData.length > 15) sparkData = sparkData.slice(-15);
+          }
+        } catch (e) {
+          // Candlestick fetch failed — continue without sparkline
+        }
+
+        const move = (openPrice != null && mid != null) ? mid - openPrice : null;
+
+        return { ticker: m.ticker, kw, createdTime, openPrice, mid, move, volume, closeTime, sparkData };
+      }));
+
+      // Sort by move descending (most moved at top)
+      results.sort((a, b) => Math.abs(b.move || 0) - Math.abs(a.move || 0));
+      setRows(results);
+      addLog(`Positioning: loaded data for ${results.length} markets`, "ok");
+    } catch (e) {
+      setError(e.message);
+      addLog("Positioning: " + e.message, "err");
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => { fetchPositioningData(); }, []);
+
+  function fmtTimeUntil(closeTime) {
+    if (!closeTime) return "—";
+    const now = new Date();
+    const close = new Date(closeTime);
+    const diffMs = close - now;
+    if (diffMs <= 0) return "Closed";
+    const hours = Math.floor(diffMs / 3600000);
+    const days = Math.floor(hours / 24);
+    const remHours = hours % 24;
+    if (days > 0) return `${days}d ${remHours}h`;
+    const mins = Math.floor((diffMs % 3600000) / 60000);
+    return `${hours}h ${mins}m`;
+  }
+
+  function MiniSparkline({ data }) {
+    if (!data || data.length < 2) return <span style={{ color: "var(--text3)", fontSize: 10 }}>—</span>;
+    const min = Math.min(...data);
+    const max = Math.max(...data);
+    const range = max - min || 0.01;
+    const h = 24;
+    const w = 80;
+    const step = w / (data.length - 1);
+    const points = data.map((v, i) => `${(i * step).toFixed(1)},${(h - ((v - min) / range) * h).toFixed(1)}`).join(" ");
+    const lastVal = data[data.length - 1];
+    const firstVal = data[0];
+    const color = lastVal >= firstVal ? "var(--green)" : "var(--red)";
+    return (
+      <svg width={w} height={h} style={{ display: "block" }}>
+        <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="section-header">
+        <div className="section-title">Market Positioning</div>
+        <div className="btn-row">
+          {loading && <div className="scan-pulse" />}
+          <button className="btn btn-primary" onClick={fetchPositioningData} disabled={loading}>
+            {loading ? "Refreshing..." : "Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ background: "var(--red-dim)", border: "1px solid var(--red)", borderRadius: "var(--r)", padding: "12px 14px", fontSize: 12, color: "var(--red)" }}>
+          Error: {error}
+        </div>
+      )}
+
+      {rows.length > 0 ? (
+        <div className="card">
+          <div className="card-title">◆ Open Markets — Early/Late Check <span style={{ color: "var(--text3)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{rows.length} markets</span></div>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Keyword</th>
+                  <th>Opened</th>
+                  <th>Open Price</th>
+                  <th>Current Mid</th>
+                  <th>Move</th>
+                  <th>Volume</th>
+                  <th>Time Left</th>
+                  <th>Sparkline</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => {
+                  const moveText = r.move != null ? `${r.move >= 0 ? "+" : ""}${(r.move * 100).toFixed(0)}¢` : "—";
+                  const moveColor = r.move != null ? (r.move > 0 ? "var(--green)" : r.move < 0 ? "var(--red)" : "var(--text2)") : "var(--text3)";
+                  return (
+                    <tr key={i}>
+                      <td><span className="keyword">{r.kw}</span></td>
+                      <td style={{ color: "var(--text3)", fontSize: 11, whiteSpace: "nowrap" }}>
+                        {r.createdTime ? new Date(r.createdTime).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                      </td>
+                      <td><span className="price">{r.openPrice != null ? fmtPct(r.openPrice) : "—"}</span></td>
+                      <td><span className="price">{r.mid != null ? fmtPct(r.mid) : "—"}</span></td>
+                      <td><span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 500, color: moveColor }}>{moveText}</span></td>
+                      <td style={{ color: "var(--text3)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{r.volume.toFixed(0)}</td>
+                      <td style={{ color: "var(--text2)", fontFamily: "var(--font-mono)", fontSize: 11, whiteSpace: "nowrap" }}>{fmtTimeUntil(r.closeTime)}</td>
+                      <td><MiniSparkline data={r.sparkData} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : !loading ? (
+        <div className="card">
+          <div className="empty">
+            <div className="empty-icon">◆</div>
+            <div className="empty-msg">No open mention markets found. Hit Refresh to re-check.</div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
