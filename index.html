@@ -196,6 +196,37 @@
   .section-title { font-family: var(--font-head); font-weight: 700; font-size: 18px; color: var(--text); }
 
   input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  /* Live Monitor */
+  .lm-transcript-area { width: 100%; min-height: 200px; background: var(--bg); border: 1px solid var(--border2); border-radius: var(--r); color: var(--text); font-family: var(--font-mono); font-size: 12px; padding: 12px; resize: vertical; line-height: 1.6; }
+  .lm-transcript-area:focus { border-color: var(--accent); outline: none; }
+  .lm-transcript-area::placeholder { color: var(--text3); }
+  .lm-kw-panel { display: flex; flex-direction: column; gap: 2px; }
+  .lm-kw-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--r); font-size: 12px; font-family: var(--font-mono); transition: background 0.3s, box-shadow 0.3s; }
+  .lm-kw-row.found { background: var(--green-dim); border: 1px solid rgba(0,217,126,0.25); }
+  .lm-kw-row.not-found { background: var(--bg3); border: 1px solid var(--border); }
+  .lm-kw-name { min-width: 120px; font-weight: 500; }
+  .lm-kw-count { min-width: 50px; font-size: 11px; }
+  .lm-kw-ticker { min-width: 160px; font-size: 10px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lm-kw-price { min-width: 50px; text-align: right; }
+  .lm-kw-action { min-width: 60px; text-align: center; font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 4px; }
+  .lm-kw-action.hold { background: var(--green-dim); color: var(--green); }
+  .lm-kw-action.exit { background: var(--amber-dim); color: var(--amber); }
+  .lm-kw-action.open { background: var(--red-dim); color: var(--red); }
+  .lm-pos-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; transition: background 0.5s, box-shadow 0.5s; }
+  .lm-pos-row.flash-green { background: rgba(0,217,126,0.18); box-shadow: inset 0 0 12px rgba(0,217,126,0.15); }
+  .lm-pos-row.flash-target { background: rgba(255,184,48,0.18); box-shadow: inset 0 0 12px rgba(255,184,48,0.15); }
+  .lm-price-indicator { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); font-size: 12px; }
+  .lm-price-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  .lm-auto-scan { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--r); }
+  .lm-auto-scan label { font-size: 12px; color: var(--text2); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .lm-auto-scan input[type=checkbox] { accent-color: var(--accent); }
+  .lm-auto-scan input[type=text] { flex: 1; }
+  .lm-diff-new { background: rgba(0,217,126,0.08); border-left: 2px solid var(--green); padding: 4px 8px; margin: 4px 0; font-family: var(--font-mono); font-size: 11px; color: var(--green); }
+  .lm-section { margin-bottom: 6px; }
+  .lm-section-title { font-family: var(--font-head); font-weight: 600; font-size: 12px; color: var(--text2); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; text-transform: uppercase; letter-spacing: 0.06em; }
+  @keyframes lm-flash { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+  .lm-flash-text { animation: lm-flash 0.6s ease-in-out 3; color: var(--green); font-weight: 600; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -699,6 +730,16 @@ function App() {
               {item.label}
             </div>
           ))}
+          <div className="sidebar-section">Live</div>
+          {[
+            { id: "monitor", icon: "◉", label: "Live Monitor" },
+          ].map(item => (
+            <div key={item.id} className={`nav-item ${tab === item.id ? "active" : ""}`} onClick={() => setTab(item.id)}>
+              <span className="nav-icon">{item.icon}</span>
+              {item.label}
+              {tab === item.id && <span style={{ marginLeft: "auto", width: 6, height: 6, borderRadius: "50%", background: "var(--red)", boxShadow: "0 0 6px var(--red)", animation: "pulse 1.5s infinite" }} />}
+            </div>
+          ))}
           <div className="sidebar-section" style={{ marginTop: "auto" }}>Status</div>
           <div style={{ padding: "8px 16px" }}>
             <div className="log-area" ref={logRef} style={{ height: 120 }}>
@@ -748,6 +789,7 @@ function App() {
             onRun={runBacktest} settled={settled} />}
           {tab === "replay" && <ReplayTab baseRates={baseRates} minEdge={minEdge} maxSize={maxSize} addLog={addLog} seriesFilter={seriesFilter} />}
           {tab === "baserates" && <BaseRatesTab baseRates={baseRates} settled={settled} />}
+          {tab === "monitor" && <LiveMonitorTab markets={markets} positions={positions} mode={mode} addLog={addLog} />}
         </div>
 
         {/* Right panel — config */}
@@ -1550,6 +1592,391 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
           <div className="empty"><div className="empty-msg">No signal data — keyword not in base rate database or no price data available</div></div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Live Monitor tab ─────────────────────────────────────────────────────────
+function LiveMonitorTab({ markets, positions, mode, addLog }) {
+  const [transcript, setTranscript] = useState("");
+  const [autoScan, setAutoScan] = useState(false);
+  const [transcriptUrl, setTranscriptUrl] = useState("");
+  const [prevFetchText, setPrevFetchText] = useState("");
+  const [diffChunks, setDiffChunks] = useState([]);
+  const [fetchStatus, setFetchStatus] = useState(null); // null | "fetching" | "ok" | "error"
+  const [positionPrices, setPositionPrices] = useState({}); // ticker -> { price, ts }
+  const [flashRows, setFlashRows] = useState({}); // ticker -> "keyword" | "target" | null
+  const [kwFlashes, setKwFlashes] = useState({}); // kw -> timestamp of last flash
+  const autoScanInterval = useRef(null);
+  const priceInterval = useRef(null);
+  const audioCtxRef = useRef(null);
+
+  // Build keyword -> market mapping from open markets
+  const kwMap = React.useMemo(() => {
+    const map = {};
+    for (const m of markets) {
+      const kw = extractKw(m);
+      if (kw) {
+        const bid = parseFloat(m.yes_bid_dollars) || 0;
+        const ask = parseFloat(m.yes_ask_dollars) || 0;
+        const mid = bid && ask ? (bid + ask) / 2 : (bid || ask);
+        map[kw] = { market: m, ticker: m.ticker, price: mid };
+      }
+    }
+    return map;
+  }, [markets]);
+
+  // Scan transcript text for keywords
+  const kwResults = React.useMemo(() => {
+    const text = transcript.toLowerCase();
+    const results = [];
+    for (const [kw, data] of Object.entries(kwMap)) {
+      // Build search terms from the keyword
+      const terms = kw.split(/\s+/).filter(w => w.length > 2);
+      let count = 0;
+      for (const term of terms) {
+        const regex = new RegExp("\\b" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        const matches = text.match(regex);
+        if (matches) count += matches.length;
+      }
+      const priceCents = Math.round(data.price * 100);
+      let action = "open";
+      if (count > 0) {
+        action = priceCents < 85 ? "hold" : "exit";
+      }
+      results.push({
+        kw,
+        ticker: data.ticker,
+        price: data.price,
+        priceCents,
+        count,
+        found: count > 0,
+        action,
+      });
+    }
+    // Sort: found first (by count desc), then not-found alphabetically
+    results.sort((a, b) => {
+      if (a.found && !b.found) return -1;
+      if (!a.found && b.found) return 1;
+      if (a.found && b.found) return b.count - a.count;
+      return a.kw.localeCompare(b.kw);
+    });
+    return results;
+  }, [transcript, kwMap]);
+
+  // Flash position rows when keywords are found
+  useEffect(() => {
+    const newFlashes = {};
+    for (const r of kwResults) {
+      if (r.found && !kwFlashes[r.kw]) {
+        newFlashes[r.kw] = Date.now();
+        // Flash the corresponding position row
+        setFlashRows(prev => ({ ...prev, [r.ticker]: "keyword" }));
+        setTimeout(() => {
+          setFlashRows(prev => {
+            const next = { ...prev };
+            if (next[r.ticker] === "keyword") delete next[r.ticker];
+            return next;
+          });
+        }, 4000);
+      }
+    }
+    if (Object.keys(newFlashes).length > 0) {
+      setKwFlashes(prev => ({ ...prev, ...newFlashes }));
+    }
+  }, [kwResults]);
+
+  // Auto-refresh prices every 15s
+  useEffect(() => {
+    async function refreshPrices() {
+      const allPositions = positions.filter(p => p.status === "open");
+      if (allPositions.length === 0) return;
+      try {
+        const tickers = [...new Set(allPositions.map(p => p.ticker))];
+        const newPrices = {};
+        for (const ticker of tickers) {
+          try {
+            const d = await kalshiFetch(`/markets/${ticker}`);
+            const m = d.market || d;
+            const bid = parseFloat(m.yes_bid_dollars) || 0;
+            const ask = parseFloat(m.yes_ask_dollars) || 0;
+            const mid = bid && ask ? (bid + ask) / 2 : (bid || ask);
+            newPrices[ticker] = { price: mid, ts: Date.now() };
+            // Check for 88¢ target
+            if (mid >= 0.88) {
+              setFlashRows(prev => ({ ...prev, [ticker]: "target" }));
+              playAlert();
+              addLog(`TARGET HIT: ${ticker} at ${Math.round(mid * 100)}¢`, "ok");
+              setTimeout(() => {
+                setFlashRows(prev => {
+                  const next = { ...prev };
+                  if (next[ticker] === "target") delete next[ticker];
+                  return next;
+                });
+              }, 5000);
+            }
+          } catch (e) {
+            // Individual ticker fetch failure — skip
+          }
+        }
+        setPositionPrices(prev => ({ ...prev, ...newPrices }));
+      } catch (e) {
+        // Silently skip
+      }
+    }
+
+    refreshPrices();
+    priceInterval.current = setInterval(refreshPrices, 15000);
+    return () => clearInterval(priceInterval.current);
+  }, [positions]);
+
+  // Auto-scan transcript URL every 30s
+  useEffect(() => {
+    if (!autoScan || !transcriptUrl) {
+      if (autoScanInterval.current) {
+        clearInterval(autoScanInterval.current);
+        autoScanInterval.current = null;
+      }
+      return;
+    }
+
+    async function fetchTranscript() {
+      setFetchStatus("fetching");
+      try {
+        const r = await fetch(`/fetch-transcript?url=${encodeURIComponent(transcriptUrl)}`);
+        const d = await r.json();
+        if (!r.ok) {
+          setFetchStatus("error");
+          addLog(`Transcript fetch error: ${d.error}`, "err");
+          return;
+        }
+        const newText = d.text || "";
+        setFetchStatus("ok");
+        // Diff against previous fetch
+        if (prevFetchText && newText.length > prevFetchText.length) {
+          const added = newText.slice(prevFetchText.length).trim();
+          if (added) {
+            setDiffChunks(prev => [...prev.slice(-20), { text: added, ts: new Date().toISOString() }]);
+            addLog(`Transcript: +${added.length} chars new text`, "ok");
+          }
+        }
+        setPrevFetchText(newText);
+        setTranscript(newText);
+      } catch (e) {
+        setFetchStatus("error");
+        addLog(`Transcript fetch failed: ${e.message}`, "err");
+      }
+    }
+
+    fetchTranscript();
+    autoScanInterval.current = setInterval(fetchTranscript, 30000);
+    return () => {
+      clearInterval(autoScanInterval.current);
+      autoScanInterval.current = null;
+    };
+  }, [autoScan, transcriptUrl]);
+
+  function playAlert() {
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.value = 1200;
+      gain.gain.value = 0.15;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.frequency.setValueAtTime(1200, ctx.currentTime);
+      osc.frequency.setValueAtTime(1600, ctx.currentTime + 0.1);
+      osc.frequency.setValueAtTime(1200, ctx.currentTime + 0.2);
+      osc.stop(ctx.currentTime + 0.3);
+    } catch (e) {}
+  }
+
+  const openPositions = positions.filter(p => p.status === "open");
+  const foundCount = kwResults.filter(r => r.found).length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="section-header">
+        <div className="section-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ color: "var(--red)", fontSize: 10, display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "var(--red)", boxShadow: "0 0 8px var(--red)", animation: "pulse 1.5s infinite" }} />
+          Live Monitor
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 11, color: "var(--text3)" }}>
+          <span>{markets.length} markets tracked</span>
+          <span style={{ color: "var(--green)" }}>{foundCount} keywords found</span>
+        </div>
+      </div>
+
+      {markets.length === 0 && (
+        <div className="card" style={{ background: "var(--amber-dim)", border: "1px solid var(--amber)" }}>
+          <div style={{ fontSize: 12, color: "var(--amber)", lineHeight: 1.6 }}>
+            No open markets loaded. Go to the Scanner tab and run a scan first to populate market data, then return here.
+          </div>
+        </div>
+      )}
+
+      {/* 1. Transcript Watcher */}
+      <div className="card">
+        <div className="card-title">
+          <span style={{ color: "var(--text)" }}>TRANSCRIPT WATCHER</span>
+          {autoScan && fetchStatus === "fetching" && <div className="scan-pulse" />}
+          {autoScan && fetchStatus === "ok" && <span style={{ fontSize: 10, color: "var(--green)" }}>LIVE</span>}
+          {autoScan && fetchStatus === "error" && <span style={{ fontSize: 10, color: "var(--red)" }}>ERROR</span>}
+        </div>
+
+        {/* Auto-scan option */}
+        <div className="lm-auto-scan" style={{ marginBottom: 10 }}>
+          <label>
+            <input type="checkbox" checked={autoScan} onChange={e => setAutoScan(e.target.checked)} />
+            Auto-scan transcript URL
+          </label>
+          {autoScan && (
+            <input type="text" placeholder="https://rev.com/transcript/..." value={transcriptUrl}
+              onChange={e => setTranscriptUrl(e.target.value)}
+              style={{ fontSize: 12 }} />
+          )}
+        </div>
+
+        {/* Manual paste area */}
+        {!autoScan && (
+          <textarea className="lm-transcript-area" rows={8} value={transcript}
+            onChange={e => setTranscript(e.target.value)}
+            placeholder="Paste live transcript text here as the speech progresses...&#10;&#10;The monitor will automatically scan for KXTRUMPMENTION keywords and highlight matches below." />
+        )}
+
+        {/* Auto-scan diff output */}
+        {autoScan && diffChunks.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div className="lm-section-title">New Text Detected</div>
+            <div style={{ maxHeight: 200, overflowY: "auto", background: "var(--bg)", borderRadius: "var(--r)", padding: 8, border: "1px solid var(--border)" }}>
+              {diffChunks.map((c, i) => (
+                <div key={i} className="lm-diff-new">
+                  <span style={{ color: "var(--text3)", fontSize: 10, marginRight: 8 }}>{new Date(c.ts).toTimeString().slice(0, 8)}</span>
+                  {c.text.slice(0, 300)}{c.text.length > 300 ? "..." : ""}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Keywords Found Panel */}
+      <div className="card">
+        <div className="card-title">
+          <span style={{ color: "var(--text)" }}>KEYWORDS FOUND</span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: foundCount > 0 ? "var(--green)" : "var(--text3)" }}>
+            {foundCount}/{kwResults.length} detected
+          </span>
+        </div>
+        {kwResults.length === 0 ? (
+          <div className="empty"><div className="empty-msg">No market keywords to track — scan markets first</div></div>
+        ) : (
+          <div className="lm-kw-panel">
+            {/* Header */}
+            <div style={{ display: "flex", gap: 10, padding: "4px 12px", fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              <span style={{ minWidth: 120 }}>Keyword</span>
+              <span style={{ minWidth: 50 }}>Count</span>
+              <span style={{ minWidth: 160 }}>Market</span>
+              <span style={{ minWidth: 50, textAlign: "right" }}>Price</span>
+              <span style={{ minWidth: 60, textAlign: "center" }}>Action</span>
+            </div>
+            {kwResults.map(r => (
+              <div key={r.kw} className={`lm-kw-row ${r.found ? "found" : "not-found"}`}>
+                <span className="lm-kw-name" style={{ color: r.found ? "var(--green)" : "var(--red)" }}>{r.kw}</span>
+                <span className="lm-kw-count" style={{ color: r.found ? "var(--green)" : "var(--text3)" }}>
+                  {r.found ? `${r.count}x` : "—"}
+                </span>
+                <span className="lm-kw-ticker">{r.ticker}</span>
+                <span className="lm-kw-price" style={{ color: r.priceCents >= 85 ? "var(--amber)" : "var(--text)" }}>
+                  {r.priceCents}¢
+                </span>
+                <span className={`lm-kw-action ${r.action}`}>
+                  {r.action === "hold" ? "HOLD" : r.action === "exit" ? "EXIT" : "STILL OPEN"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 2. Position Monitor */}
+      <div className="card">
+        <div className="card-title">
+          <span style={{ color: "var(--text)" }}>POSITION MONITOR</span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)" }}>
+            auto-refresh 15s
+          </span>
+          <div className="lm-price-dot" />
+        </div>
+        {openPositions.length === 0 ? (
+          <div className="empty"><div className="empty-msg">No open positions — place trades from the Scanner tab</div></div>
+        ) : (
+          <div>
+            {/* Header */}
+            <div style={{ display: "flex", gap: 10, padding: "4px 12px", fontSize: 10, color: "var(--text3)", textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: "1px solid var(--border)" }}>
+              <span style={{ minWidth: 180 }}>Ticker</span>
+              <span style={{ minWidth: 50 }}>Side</span>
+              <span style={{ minWidth: 50 }}>Entry</span>
+              <span style={{ minWidth: 70 }}>Live Price</span>
+              <span style={{ minWidth: 50 }}>Qty</span>
+              <span style={{ flex: 1 }}>Status</span>
+            </div>
+            {openPositions.map(p => {
+              const liveData = positionPrices[p.ticker];
+              const livePrice = liveData ? liveData.price : null;
+              const liveCents = livePrice ? Math.round(livePrice * 100) : null;
+              const flash = flashRows[p.ticker];
+              const kwFound = kwResults.find(r => r.found && r.ticker === p.ticker);
+
+              return (
+                <div key={p.id} className={`lm-pos-row ${flash === "keyword" ? "flash-green" : flash === "target" ? "flash-target" : ""}`}>
+                  <span style={{ minWidth: 180, fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 500, color: "var(--text)" }}>
+                    {p.ticker.slice(0, 24)}
+                  </span>
+                  <span style={{ minWidth: 50 }}>
+                    <span className={`badge ${p.side === "yes" ? "badge-yes" : "badge-no"}`}>{p.side.toUpperCase()}</span>
+                  </span>
+                  <span style={{ minWidth: 50, fontFamily: "var(--font-mono)", fontSize: 12 }}>{fmtPct(p.price)}</span>
+                  <span style={{ minWidth: 70 }}>
+                    {liveCents !== null ? (
+                      <span className="lm-price-indicator">
+                        <span className="lm-price-dot" style={{ width: 4, height: 4 }} />
+                        <span style={{ color: liveCents >= 88 ? "var(--amber)" : liveCents > Math.round(p.price * 100) ? "var(--green)" : "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+                          {liveCents}¢
+                        </span>
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--text3)", fontSize: 11 }}>—</span>
+                    )}
+                  </span>
+                  <span style={{ minWidth: 50, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text3)" }}>{p.qty}</span>
+                  <span style={{ flex: 1 }}>
+                    {kwFound && (
+                      <span className="lm-flash-text">KEYWORD FOUND — consider exiting toward $1.00</span>
+                    )}
+                    {liveCents !== null && liveCents >= 88 && (
+                      <span style={{ color: "var(--amber)", fontWeight: 600, fontSize: 11, animation: "lm-flash 0.6s ease-in-out 3" }}>
+                        TARGET HIT — {liveCents}¢
+                      </span>
+                    )}
+                    {!kwFound && (liveCents === null || liveCents < 88) && (
+                      <span style={{ color: "var(--text3)", fontSize: 11 }}>
+                        {mode === "paper" ? "PAPER" : "LIVE"} · monitoring
+                      </span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
