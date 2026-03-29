@@ -196,6 +196,20 @@
   .section-title { font-family: var(--font-head); font-weight: 700; font-size: 18px; color: var(--text); }
 
   input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  /* Rules summary panel */
+  .rules-summary { background: var(--bg); border: 1px solid var(--border); border-radius: var(--r); padding: 14px 16px; margin-top: 8px; }
+  .rules-text { font-family: var(--font-mono); font-size: 11px; color: var(--text2); line-height: 1.7; white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; }
+  .rules-facts { display: flex; flex-direction: column; gap: 6px; }
+  .rules-fact { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; color: var(--text2); }
+  .rules-fact-label { font-family: var(--font-mono); color: var(--text3); min-width: 160px; flex-shrink: 0; }
+  .rules-fact-value { font-family: var(--font-mono); color: var(--text); }
+  .rules-warn-badge { display: inline-flex; align-items: center; gap: 5px; background: var(--red-dim); border: 1px solid var(--red); color: var(--red); font-size: 10px; font-family: var(--font-mono); font-weight: 500; padding: 3px 8px; border-radius: 4px; margin-top: 8px; }
+  .rules-section-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); margin-bottom: 6px; }
+  .signal-row-expandable { cursor: pointer; }
+  .signal-row-expandable:hover td { background: var(--bg3); }
+  .expand-arrow { display: inline-block; font-size: 9px; color: var(--text3); margin-right: 4px; transition: transform 0.15s; }
+  .expand-arrow.open { transform: rotate(90deg); }
 </style>
 </head>
 <body>
@@ -277,6 +291,91 @@ const extractKw = m => {
   }
   return normalizeKw(raw);
 };
+
+// ── Rules Summary helpers ────────────────────────────────────────────────────
+function extractKeyFacts(rulesText) {
+  if (!rulesText) return null;
+  const lower = rulesText.toLowerCase();
+  const facts = {};
+
+  // Plural form?
+  if (/plural|form|includes/i.test(rulesText)) {
+    const match = rulesText.match(/[^.]*(?:plural|form|includes)[^.]*/i);
+    facts.plural = match ? match[0].trim() : "Yes — mentioned in rules";
+  } else {
+    facts.plural = "Not mentioned";
+  }
+
+  // How many times?
+  if (/at least|times|once/i.test(rulesText)) {
+    const match = rulesText.match(/[^.]*(?:at least|times|once)[^.]*/i);
+    facts.count = match ? match[0].trim() : "Mentioned in rules";
+  } else {
+    facts.count = "Not specified";
+  }
+
+  // Transcript source?
+  if (/transcript|official|website/i.test(rulesText)) {
+    const match = rulesText.match(/[^.]*(?:transcript|official|website)[^.]*/i);
+    facts.source = match ? match[0].trim() : "Mentioned in rules";
+  } else {
+    facts.source = "Not specified";
+  }
+
+  // Exact phrase?
+  if (/exact|verbatim|phrase/i.test(rulesText)) {
+    const match = rulesText.match(/[^.]*(?:exact|verbatim|phrase)[^.]*/i);
+    facts.exactPhrase = match ? match[0].trim() : "Yes — mentioned in rules";
+  } else {
+    facts.exactPhrase = "Not required";
+  }
+
+  // High-risk warning
+  facts.highRisk = /verbatim|exact phrase|official transcript only/i.test(rulesText);
+
+  return facts;
+}
+
+function RulesSummary({ market }) {
+  const rules = market && market.rules_primary;
+  if (!rules) {
+    return (
+      React.createElement("div", { className: "rules-summary" },
+        React.createElement("div", { className: "rules-section-label" }, "Rules"),
+        React.createElement("div", { style: { fontSize: 11, color: "var(--text3)", fontStyle: "italic" } }, "No rules_primary data available for this market")
+      )
+    );
+  }
+
+  const facts = extractKeyFacts(rules);
+
+  return (
+    React.createElement("div", { className: "rules-summary" },
+      React.createElement("div", { className: "rules-section-label" }, "Rules Primary"),
+      React.createElement("div", { className: "rules-text" }, rules),
+      React.createElement("div", { className: "rules-section-label", style: { marginTop: 10 } }, "Key Facts"),
+      React.createElement("div", { className: "rules-facts" },
+        React.createElement("div", { className: "rules-fact" },
+          React.createElement("span", { className: "rules-fact-label" }, "Plural form counts?"),
+          React.createElement("span", { className: "rules-fact-value" }, facts.plural)
+        ),
+        React.createElement("div", { className: "rules-fact" },
+          React.createElement("span", { className: "rules-fact-label" }, "How many times?"),
+          React.createElement("span", { className: "rules-fact-value" }, facts.count)
+        ),
+        React.createElement("div", { className: "rules-fact" },
+          React.createElement("span", { className: "rules-fact-label" }, "Transcript source?"),
+          React.createElement("span", { className: "rules-fact-value" }, facts.source)
+        ),
+        React.createElement("div", { className: "rules-fact" },
+          React.createElement("span", { className: "rules-fact-label" }, "Exact phrase required?"),
+          React.createElement("span", { className: "rules-fact-value" }, facts.exactPhrase)
+        )
+      ),
+      facts.highRisk && React.createElement("div", { className: "rules-warn-badge" }, "⚠ HIGH RESOLUTION RISK — rules contain strict matching requirements")
+    )
+  );
+}
 
 // ── Kalshi API (no auth needed for public market data) ────────────────────────
 // ── Authenticated API calls (require env vars set in Netlify) ────────────────
@@ -803,6 +902,7 @@ function App() {
 
 // ── Scanner tab ───────────────────────────────────────────────────────────────
 function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, onTrade, minEdge, mode, autoScanActive, onToggleAlerts, alertActive, newMarketAlert, onDismissAlert }) {
+  const [expandedIdx, setExpandedIdx] = useState(null);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="section-header">
@@ -852,22 +952,34 @@ function ScannerTab({ signals, markets, scanning, apiError, onScan, onAutoScan, 
                 </tr>
               </thead>
               <tbody>
-                {signals.map((s, i) => (
-                  <tr key={i}>
-                    <td><span className="ticker">{s.market.ticker.slice(0, 22)}</span></td>
-                    <td><span className="keyword">{s.kw}</span></td>
-                    <td><span className="price">{fmtPct(s.mid)}</span></td>
-                    <td><span className="price">{fmtPct(s.fv)}</span></td>
-                    <td><span className={s.edge > 0 ? "edge-pos" : "edge-neg"}>{s.edge > 0 ? "+" : ""}{(s.edge * 100).toFixed(0)}¢</span></td>
-                    <td><span className={`badge ${s.edge > 0 ? "badge-yes" : "badge-no"}`}>{s.edge > 0 ? "YES" : "NO"}</span></td>
-                    <td><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: s.n >= 5 ? "var(--green)" : s.n >= 2 ? "var(--amber)" : "var(--red)" }}>{s.n === 0 ? "seed" : `n=${s.n}`}</span></td>
-                    <td>
-                      <button className="btn btn-primary" style={{ padding: "4px 10px", fontSize: 11 }} onClick={() => onTrade(s)}>
-                        {mode === "paper" ? "Paper Trade" : "Trade"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {signals.map((s, i) => {
+                  const isExpanded = expandedIdx === i;
+                  return (
+                    <React.Fragment key={i}>
+                      <tr className="signal-row-expandable" onClick={() => setExpandedIdx(isExpanded ? null : i)}>
+                        <td><span className={`expand-arrow ${isExpanded ? "open" : ""}`}>▶</span><span className="ticker">{s.market.ticker.slice(0, 22)}</span></td>
+                        <td><span className="keyword">{s.kw}</span></td>
+                        <td><span className="price">{fmtPct(s.mid)}</span></td>
+                        <td><span className="price">{fmtPct(s.fv)}</span></td>
+                        <td><span className={s.edge > 0 ? "edge-pos" : "edge-neg"}>{s.edge > 0 ? "+" : ""}{(s.edge * 100).toFixed(0)}¢</span></td>
+                        <td><span className={`badge ${s.edge > 0 ? "badge-yes" : "badge-no"}`}>{s.edge > 0 ? "YES" : "NO"}</span></td>
+                        <td><span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: s.n >= 5 ? "var(--green)" : s.n >= 2 ? "var(--amber)" : "var(--red)" }}>{s.n === 0 ? "seed" : `n=${s.n}`}</span></td>
+                        <td>
+                          <button className="btn btn-primary" style={{ padding: "4px 10px", fontSize: 11 }} onClick={(e) => { e.stopPropagation(); onTrade(s); }}>
+                            {mode === "paper" ? "Paper Trade" : "Trade"}
+                          </button>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr>
+                          <td colSpan={8} style={{ padding: "0 12px 12px", background: "var(--bg3)" }}>
+                            <RulesSummary market={s.market} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1473,6 +1585,14 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Rules summary for selected market */}
+      {selectedMarket && (
+        <div className="card">
+          <div className="card-title">Rules Summary — {extractKw(selectedMarket)}</div>
+          <RulesSummary market={selectedMarket} />
         </div>
       )}
 
