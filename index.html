@@ -232,15 +232,24 @@ const isMention = m => {
 const FILLER_WORDS = new Set(["the","a","an","will","say","said","says","be","mentioned","mention","during","speech","address","in","his","her","at","to","of","and","or","is","it","that","this","for","on","with","by","from","he","she","they","its","their","stated","announce","use","word","phrase"]);
 
 function normalizeKw(raw) {
-  // 1. Handle slash-separated variants: keep ALL terms (replace / with space)
-  let s = raw.replace(/\s*\/\s*/g, " ");
-  // 2. Strip punctuation except hyphens within words
+  // 1. Try to extract first quoted term from raw input
+  const quoteMatch = raw.match(/['"'\u2018\u2019\u201C\u201D""](.+?)['"'\u2018\u2019\u201C\u201D""]/);
+  if (quoteMatch) {
+    const term = quoteMatch[1].trim().toLowerCase().replace(/[^\w\s-]/g, "");
+    const words = term.split(/\s+/).filter(w => w.length > 0);
+    if (words.length > 0) return words[0].slice(0, 20);
+  }
+  // 2. Handle slash-separated variants: keep first term only
+  let s = raw.split(/\s*\/\s*/)[0] || raw;
+  // 3. Strip punctuation except hyphens within words
   s = s.replace(/[''"""\u2018\u2019\u201C\u201D]/g, "").replace(/[^\w\s-]/g, " ");
-  // 3. Lowercase, split, strip filler, rejoin
+  // 4. Lowercase, split, strip filler, take FIRST meaningful word only
   const words = s.toLowerCase().split(/\s+/).filter(w => w.length > 0 && !FILLER_WORDS.has(w));
-  // 4. Strip trailing 's' for naive depluralization (but protect short words and known terms)
-  const deplural = words.map(w => (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) ? w.slice(0, -1) : w);
-  return deplural.join(" ").trim().slice(0, 30) || raw.toLowerCase().trim().slice(0, 30);
+  if (words.length === 0) return raw.toLowerCase().trim().slice(0, 20);
+  // 5. Strip trailing 's' for naive depluralization (but protect short words and known terms)
+  let w = words[0];
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) w = w.slice(0, -1);
+  return w.slice(0, 20);
 }
 
 // Aliases map variant keywords to canonical seed keys
@@ -267,15 +276,17 @@ function matchSeedKey(normalized, seedKeys) {
 }
 
 const extractKw = m => {
-  const src = [m.yes_sub_title, m.title].join(" ");
-  const quoted = src.match(/['"'""\u2018\u2019\u201C\u201D](.+?)['"'""\u2018\u2019\u201C\u201D]/);
-  let raw;
-  if (quoted) {
-    raw = quoted[1];
-  } else {
-    raw = (m.yes_sub_title || m.title || "");
+  // Try yes_sub_title first (cleaner, more specific), then fall back to title
+  const subTitle = m.yes_sub_title || "";
+  const title = m.title || "";
+  // Check for quoted content in sub_title first, then title
+  for (const src of [subTitle, title]) {
+    if (!src) continue;
+    const quoted = src.match(/['"'""\u2018\u2019\u201C\u201D](.+?)['"'""\u2018\u2019\u201C\u201D]/);
+    if (quoted) return normalizeKw(quoted[1]);
   }
-  return normalizeKw(raw);
+  // No quotes found — use sub_title if available, else title
+  return normalizeKw(subTitle || title);
 };
 
 // ── Kalshi API (no auth needed for public market data) ────────────────────────
@@ -1219,11 +1230,21 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
       const closeTs = market.close_time ? Math.floor(new Date(market.close_time).getTime() / 1000) : Math.floor(Date.now() / 1000);
       const startTs = closeTs - 48 * 3600;
 
+      // Debug: log market details
+      console.log("[Replay] loadCandles for market:", {
+        ticker: market.ticker,
+        series_ticker: market.series_ticker,
+        event_ticker: market.event_ticker,
+        close_time: market.close_time,
+        closeTs, startTs,
+      });
+
       // Determine if market is historical by checking cutoff
       let useHistorical = false;
       try {
         const cutoff = await kalshiFetch("/historical/cutoff");
         const cutoffTs = cutoff.market_settled_ts || 0;
+        console.log("[Replay] cutoff response:", { cutoffTs, closeTs, isHistorical: cutoffTs && closeTs < cutoffTs });
         if (cutoffTs && closeTs < cutoffTs) {
           useHistorical = true;
         }
@@ -1235,21 +1256,53 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
       let sticks = [];
       if (useHistorical) {
         try {
-          const d = await kalshiFetch(`/historical/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
+          const url = `/historical/markets/${market.ticker}/candlesticks`;
+          const params = { start_ts: startTs, end_ts: closeTs, period_interval: 1 };
+          console.log("[Replay] Fetching historical candles:", url, params);
+          const d = await kalshiFetch(url, params);
+          console.log("[Replay] Historical candle response:", d);
           sticks = d.candlesticks || [];
           addLog(`Replay: fetched ${sticks.length} historical candles for ${market.ticker}`, "ok");
         } catch (e) {
+          console.log("[Replay] Historical candlestick error:", e);
           addLog("Replay: historical candlestick fetch failed — " + e.message, "warn");
         }
       }
       // Try live endpoint if historical didn't work or wasn't needed
       if (sticks.length === 0) {
         try {
-          const d = await kalshiFetch(`/series/${market.series_ticker}/markets/${market.ticker}/candlesticks`, { start_ts: startTs, end_ts: closeTs, period_interval: 1 });
+          // series_ticker may be undefined — derive from ticker if needed
+          const seriesTicker = market.series_ticker || market.ticker.replace(/-[^-]+$/, "");
+          const url = `/series/${seriesTicker}/markets/${market.ticker}/candlesticks`;
+          const params = { start_ts: startTs, end_ts: closeTs, period_interval: 1 };
+          console.log("[Replay] Fetching live candles:", url, params, "series_ticker from market:", market.series_ticker);
+          const d = await kalshiFetch(url, params);
+          console.log("[Replay] Live candle response:", d);
           sticks = d.candlesticks || [];
           if (sticks.length > 0) addLog(`Replay: fetched ${sticks.length} live candles for ${market.ticker}`, "ok");
         } catch (e) {
+          console.log("[Replay] Live candlestick error:", e);
           addLog("Replay: live candlestick fetch failed — " + e.message, "warn");
+        }
+      }
+      // Fallback: try batch candlestick endpoint
+      if (sticks.length === 0) {
+        try {
+          const url = `/markets/candlesticks`;
+          const params = { tickers: market.ticker, start_ts: startTs, end_ts: closeTs, period_interval: 1 };
+          console.log("[Replay] Fetching batch candles:", url, params);
+          const d = await kalshiFetch(url, params);
+          console.log("[Replay] Batch candle response:", d);
+          // Batch endpoint may return { candlesticks: [...] } or { market_candlesticks: { TICKER: [...] } }
+          if (d.candlesticks && d.candlesticks.length > 0) {
+            sticks = d.candlesticks;
+          } else if (d.market_candlesticks && d.market_candlesticks[market.ticker]) {
+            sticks = d.market_candlesticks[market.ticker];
+          }
+          if (sticks.length > 0) addLog(`Replay: fetched ${sticks.length} batch candles for ${market.ticker}`, "ok");
+        } catch (e) {
+          console.log("[Replay] Batch candlestick error:", e);
+          addLog("Replay: batch candlestick fetch failed — " + e.message, "warn");
         }
       }
       if (sticks.length === 0) addLog(`Replay: no candlestick data found for ${market.ticker}`, "warn");
@@ -1258,10 +1311,12 @@ function ReplayTab({ baseRates, minEdge, maxSize, addLog, seriesFilter }) {
       // Fetch individual trades
       try {
         const td = await kalshiFetch("/historical/trades", { ticker: market.ticker, limit: "500" });
+        console.log("[Replay] Trade response:", { count: (td.trades || []).length });
         const tradeList = td.trades || [];
         setTrades(tradeList);
         addLog(`Replay: fetched ${tradeList.length} trades for ${market.ticker}`, "ok");
       } catch (e) {
+        console.log("[Replay] Trade fetch error:", e);
         addLog("Replay: trade fetch failed — " + e.message, "warn");
         setTrades([]);
       }
