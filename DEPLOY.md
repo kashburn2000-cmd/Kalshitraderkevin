@@ -1,14 +1,14 @@
-# Kalshi Mentions Trader — Netlify Deployment Guide
+# Kalshi Mentions Trader — Cloudflare Workers Deployment Guide
 
-## Folder structure to upload
+## Folder structure
 ```
-kalshi-netlify/
-├── netlify.toml                  ← routing config
-├── netlify/
-│   └── functions/
-│       └── kalshi.js             ← secure signing proxy
-└── public/
-    └── index.html                ← the dashboard
+kalshi-trader/
+├── wrangler.toml              ← Cloudflare Workers config
+├── workers/
+│   └── index.js               ← Worker: signing proxy + KV state + static serving
+├── public/
+│   └── index.html             ← the dashboard
+└── package.json
 ```
 
 ---
@@ -22,65 +22,77 @@ kalshi-netlify/
 
 ---
 
-## Step 2 — Deploy to Netlify
+## Step 2 — Install Wrangler CLI
 
-### Option A: Netlify CLI (easiest)
 ```bash
-npm install -g netlify-cli
-cd kalshi-netlify
-netlify deploy --prod
+npm install -g wrangler
 ```
-
-### Option B: GitHub (recommended for updates)
-1. Push this folder to a GitHub repo
-2. Go to app.netlify.com → New site from Git → connect your repo
-3. Build settings: leave blank (no build command needed)
-4. Publish directory: `public`
-5. Deploy
-
-### Option C: Drag and drop
-Zip the entire `kalshi-netlify` folder and drag to app.netlify.com/drop
-(Note: functions may not work with drag-and-drop on free tier — use Option A or B)
 
 ---
 
-## Step 3 — Add environment variables (THE IMPORTANT PART)
+## Step 3 — Login to Cloudflare
 
-1. Go to your site in the Netlify dashboard
-2. **Site configuration** → **Environment variables** → **Add a variable**
-
-Add these two:
-
-| Key | Value |
-|-----|-------|
-| `KALSHI_KEY_ID` | Your Key ID from Step 1 |
-| `KALSHI_PRIVATE_KEY` | The entire PEM text including BEGIN/END lines |
-
-For the private key, paste the whole thing — newlines included. It should look like:
+```bash
+wrangler login
 ```
------BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC...
-(many lines)
------END PRIVATE KEY-----
-```
-
-3. Click **Save** after adding each variable
-4. **Trigger a redeploy**: Deploys → Trigger deploy → Deploy site
 
 ---
 
-## Step 4 — Verify it works
+## Step 4 — Create a KV namespace
 
-1. Visit your Netlify URL
+```bash
+wrangler kv:namespace create "TRADING_STATE"
+```
+
+Copy the `id` value from the output and paste it into `wrangler.toml` replacing `REPLACE_WITH_KV_NAMESPACE_ID`.
+
+---
+
+## Step 5 — Set secrets
+
+```bash
+wrangler secret put KALSHI_KEY_ID
+# Paste your Key ID when prompted
+
+wrangler secret put KALSHI_PRIVATE_KEY
+# Paste the entire PEM text (including BEGIN/END lines) when prompted
+```
+
+---
+
+## Step 6 — Deploy
+
+```bash
+wrangler deploy
+```
+
+Your Worker will be live at `https://kalshi-trader.<your-subdomain>.workers.dev`.
+
+---
+
+## Local development
+
+```bash
+npm install
+npm run dev
+```
+
+This starts a local dev server with `wrangler dev`.
+
+---
+
+## Verify it works
+
+1. Visit your Worker URL
 2. The topbar should show a green **"✓ API connected"** badge with your balance
-3. If it shows amber "⚠ credentials not configured" — the env vars didn't save, repeat Step 3
+3. If it shows amber "⚠ credentials not configured" — the secrets didn't save, repeat Step 5
 4. If it shows an HTTP error — double-check the Key ID and that the full PEM was pasted
 
 ---
 
 ## Security notes
 
-- Your private key lives ONLY in Netlify's encrypted environment variables — never in the HTML
+- Your private key lives ONLY in Cloudflare Workers encrypted secrets — never in the HTML
 - The proxy function validates every request path against a whitelist before forwarding
 - The browser never sees your key at any point
 - If you ever suspect your key is compromised: delete it on Kalshi's site immediately and generate a new one
