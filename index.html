@@ -783,9 +783,11 @@ function App() {
             </div>
           </div>
           {mode === "live" && (
-            <div className="config-item" style={{ background: "var(--red-dim)" }}>
-              <div style={{ fontSize: 11, color: "var(--red)", lineHeight: 1.5 }}>
-                Live mode requires your Kalshi API key to be integrated into this app. Contact your developer to add RSA signing support before using live mode.
+            <div className="config-item" style={{ background: "var(--amber-dim)" }}>
+              <div style={{ fontSize: 11, color: "var(--amber)", lineHeight: 1.6 }}>
+                ⚠️ Live mode active. Real orders will be placed on Kalshi.
+                Start with small position sizes. Verify your balance shows correctly
+                in the topbar before placing any trades.
               </div>
             </div>
           )}
