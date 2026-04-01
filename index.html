@@ -214,6 +214,17 @@ const fmtPct = v => (v * 100).toFixed(0) + "¢";
 const fmtDollar = v => (v >= 0 ? "+" : "") + "$" + Math.abs(v).toFixed(2);
 const fmtTime = () => new Date().toTimeString().slice(0, 8);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtRelTime = iso => {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+};
 
 const MENTION_KWS = ["mention", "say", "said", "utter", "speak", "word", "phrase",
   "sotu", "speech", "address", "press conference", "earnings", "debate", "will use",
@@ -472,7 +483,6 @@ function App() {
   const [markets, setMarkets] = useState([]);
   const [settled, setSettled] = useState([]);
   const [signals, setSignals] = useState([]);
-  const [backtestResults, setBacktestResults] = useState(null);
   const [backtesting, setBacktesting] = useState(false);
   const [logs, addLog] = useLog();
   const [apiError, setApiError] = useState(null);
@@ -488,6 +498,7 @@ function App() {
   const [minEdge, setMinEdge] = usePersistentState('kbt_min_edge', 0.08);
   const [maxSize, setMaxSize] = usePersistentState('kbt_max_size', 10);
   const [mode, setMode, modeSynced, modeSaving] = usePersistentState('kbt_mode', 'paper');
+  const [backtestResults, setBacktestResults] = usePersistentState('kbt_backtest_results', null);
 
   // Saving indicator — true if any persisted state is writing
   const saving = positionsSaving || ordersSaving || modeSaving;
@@ -665,11 +676,11 @@ function App() {
 
       const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
       const winRate = trades.length ? trades.filter(t => t.correct).length / trades.length : 0;
-      setBacktestResults({ trades, totalPnl, winRate, keywords: merged, settled: s.length });
+      setBacktestResults({ trades, totalPnl, winRate, keywords: merged, settled: s.length, lastBacktestTime: new Date().toISOString() });
       addLog(`Backtest complete: ${trades.length} trades, EV=${fmtDollar(totalPnl)}`, totalPnl > 0 ? "ok" : "warn");
     } catch (e) {
       addLog("Backtest failed: " + e.message, "err");
-      setBacktestResults(makeDemoResults());
+      setBacktestResults({ ...makeDemoResults(), lastBacktestTime: new Date().toISOString() });
     }
     setBacktesting(false);
   }
@@ -780,6 +791,15 @@ function App() {
   }
 
   useEffect(() => () => { clearInterval(scanInterval.current); clearInterval(alertInterval.current); }, []);
+
+  // Auto-scan on load once persisted state is restored
+  const autoScannedRef = useRef(false);
+  useEffect(() => {
+    if (positionsSynced && !autoScannedRef.current) {
+      autoScannedRef.current = true;
+      runScan();
+    }
+  }, [positionsSynced]);
 
   // Clear all persisted data
   function handleClearAll() {
@@ -1166,7 +1186,10 @@ function BacktestTab({ results, backtesting, onRun, settled }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div className="section-header">
-        <div className="section-title">Backtester</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <div className="section-title">Backtester</div>
+          {results && results.lastBacktestTime && <span style={{ fontSize: 11, color: "var(--text3)", fontFamily: "var(--font-mono)" }}>Last run: {fmtRelTime(results.lastBacktestTime)}</span>}
+        </div>
         <button className="btn btn-primary" onClick={onRun} disabled={backtesting}>
           {backtesting ? "Running..." : "Run Backtest"}
         </button>

@@ -4,7 +4,8 @@ const ALLOWED_KEYS = [
   'kbt_positions', 'kbt_orders', 'kbt_base_rates',
   'kbt_series_filter', 'kbt_min_edge', 'kbt_max_size',
   'kbt_mode', 'kbt_bankroll', 'kbt_sizing_method',
-  'kbt_known_tickers', 'kbt_alert_email'
+  'kbt_known_tickers', 'kbt_alert_email',
+  'kbt_backtest_results'
 ];
 
 function cors() {
