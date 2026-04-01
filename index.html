@@ -829,6 +829,33 @@ function App() {
           {restoredBanner && <span style={{fontSize: 11, color: 'var(--amber)', background: 'var(--amber-dim)', padding: '2px 8px', borderRadius: 'var(--r)', marginRight: 8}}>{restoredBanner}</span>}
           <div className={`dot ${mode === "live" ? "live" : "paper"}`} />
           {mode === "paper" ? "Paper trading" : "Live trading"}
+          {authStatus && authStatus.ok && liveBalance !== null && (
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12,
+              color: 'var(--green)',
+              background: 'var(--green-dim)',
+              border: '1px solid var(--green)',
+              borderRadius: 'var(--r)',
+              padding: '2px 10px',
+              marginRight: 8
+            }}>
+              Balance: ${liveBalance.toFixed(2)}
+            </span>
+          )}
+          {authStatus && !authStatus.ok && (
+            <span style={{
+              fontSize: 11,
+              color: 'var(--amber)',
+              background: 'var(--amber-dim)',
+              border: '1px solid var(--amber)',
+              borderRadius: 'var(--r)',
+              padding: '2px 10px',
+              marginRight: 8
+            }}>
+              ⚠ {authStatus.reason}
+            </span>
+          )}
           {lastScan && <span style={{ marginLeft: 12, fontSize: 11, color: "var(--text3)" }}>Last scan {lastScan.toTimeString().slice(0, 8)}</span>}
         </div>
       </div>
